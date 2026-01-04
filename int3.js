@@ -901,7 +901,239 @@
     // showLogo — оставляем твою реализацию полностью (коротко: вставь сюда свой блок showLogo без изменений)
     // Чтобы ответ не раздувать ещё больше — я оставил "как есть" у тебя.
     // ВАЖНО: если хочешь, я могу вернуть showLogo целиком здесь же, но он у тебя уже рабочий.
-    InfoPanel.prototype.showLogo = function () {};
+    InfoPanel.prototype.showLogo = function (data, renderId) {
+  var _this = this;
+
+  var FADE_OUT_TEXT = 300;
+  var MORPH_HEIGHT = 400;
+  var FADE_IN_IMG = 400;
+  var TARGET_WIDTH = "7em";
+  var PADDING_TOP_EM = 0;
+  var PADDING_BOTTOM_EM = 0.2;
+
+  var title_elem = this.html.find(".new-interface-info__title");
+  var head_elem = this.html.find(".new-interface-info__head");
+  var details_elem = this.html.find(".new-interface-info__details");
+  var dom_title = title_elem[0];
+
+  function applyFinalStyles(img, text_height) {
+    img.style.marginTop = "0";
+    img.style.marginLeft = "0";
+    img.style.paddingTop = PADDING_TOP_EM + "em";
+    img.style.paddingBottom = PADDING_BOTTOM_EM + "em";
+
+    img.style.imageRendering = "-webkit-optimize-contrast";
+
+    if (text_height) {
+      img.style.height = text_height + "px";
+      img.style.width = "auto";
+      img.style.maxWidth = "100%";
+      img.style.maxHeight = "none";
+    } else if (window.innerWidth < 768) {
+      img.style.width = "100%";
+      img.style.height = "auto";
+      img.style.maxWidth = "100%";
+      img.style.maxHeight = "none";
+    } else {
+      img.style.width = TARGET_WIDTH;
+      img.style.height = "auto";
+      img.style.maxHeight = "none";
+      img.style.maxWidth = "100%";
+    }
+
+    img.style.boxSizing = "border-box";
+    img.style.display = "block";
+    img.style.objectFit = "contain";
+    img.style.objectPosition = "left bottom";
+    img.style.transition = "none";
+  }
+
+  function moveHeadToDetails(animate) {
+    if (!head_elem.length || !details_elem.length) return;
+    if (details_elem.find(".logo-moved-head").length > 0) return;
+
+    var content = head_elem.html();
+    if (!content || content.trim() === "") return;
+
+    var new_item = $('<span class="logo-moved-head">' + content + "</span>");
+    var separator = $('<span class="new-interface-info__split logo-moved-separator">●</span>');
+
+    if (animate) {
+      new_item.css({ opacity: 0, transition: "none" });
+      separator.css({ opacity: 0, transition: "none" });
+    }
+
+    if (details_elem.children().length > 0) details_elem.append(separator);
+    details_elem.append(new_item);
+
+    if (animate) {
+      head_elem.css({
+        transition: "opacity " + FADE_OUT_TEXT / 1000 + "s ease",
+        opacity: "0",
+      });
+
+      setTimeout(function () {
+        new_item.css({ transition: "opacity " + FADE_IN_IMG / 1000 + "s ease", opacity: "1" });
+        separator.css({ transition: "opacity " + FADE_IN_IMG / 1000 + "s ease", opacity: "1" });
+      }, FADE_OUT_TEXT);
+    } else {
+      head_elem.css({ opacity: "0", transition: "none" });
+    }
+  }
+
+  function startLogoAnimation(img_url, fromCache) {
+    if (renderId && renderId !== _this.lastRenderId) return;
+
+    var img = new Image();
+    img.src = img_url;
+
+    var start_text_height = 0;
+    if (dom_title) start_text_height = dom_title.getBoundingClientRect().height;
+
+    if (fromCache) {
+      if (dom_title) start_text_height = dom_title.getBoundingClientRect().height;
+
+      moveHeadToDetails(false);
+      applyFinalStyles(img, start_text_height);
+
+      title_elem.empty().append(img);
+      title_elem.css({ opacity: "1", transition: "none" });
+
+      if (dom_title) {
+        dom_title.style.display = "block";
+        dom_title.style.height = "";
+        dom_title.style.transition = "none";
+      }
+      img.style.opacity = "1";
+      return;
+    }
+
+    applyFinalStyles(img, start_text_height);
+    img.style.opacity = "0";
+
+    img.onload = function () {
+      if (renderId && renderId !== _this.lastRenderId) return;
+
+      setTimeout(function () {
+        if (renderId && renderId !== _this.lastRenderId) return;
+
+        if (dom_title) start_text_height = dom_title.getBoundingClientRect().height;
+
+        moveHeadToDetails(true);
+
+        title_elem.css({
+          transition: "opacity " + FADE_OUT_TEXT / 1000 + "s ease",
+          opacity: "0",
+        });
+
+        setTimeout(function () {
+          if (renderId && renderId !== _this.lastRenderId) return;
+
+          title_elem.empty();
+          title_elem.append(img);
+          title_elem.css({ opacity: "1", transition: "none" });
+
+          var target_container_height = dom_title.getBoundingClientRect().height;
+
+          dom_title.style.height = start_text_height + "px";
+          dom_title.style.display = "block";
+          dom_title.style.overflow = "hidden";
+          dom_title.style.boxSizing = "border-box";
+
+          void dom_title.offsetHeight;
+
+          dom_title.style.transition =
+            "height " + MORPH_HEIGHT / 1000 + "s cubic-bezier(0.4, 0, 0.2, 1)";
+
+          requestAnimationFrame(function () {
+            if (renderId && renderId !== _this.lastRenderId) return;
+            dom_title.style.height = target_container_height + "px";
+
+            setTimeout(function () {
+              if (renderId && renderId !== _this.lastRenderId) return;
+              img.style.transition = "opacity " + FADE_IN_IMG / 1000 + "s ease";
+              img.style.opacity = "1";
+            }, Math.max(0, MORPH_HEIGHT - 100));
+
+            setTimeout(function () {
+              if (renderId && renderId !== _this.lastRenderId) return;
+              applyFinalStyles(img, start_text_height);
+              dom_title.style.height = "";
+            }, MORPH_HEIGHT + FADE_IN_IMG + 50);
+          });
+        }, FADE_OUT_TEXT);
+      }, 200);
+    };
+
+    img.onerror = function () {
+      title_elem.css({ opacity: "1", transition: "none" });
+    };
+  }
+
+  if (data.id) {
+    var type = data.name ? "tv" : "movie";
+    var language = Lampa.Storage.get("language");
+    var cache_key = "logo_cache_v2_" + type + "_" + data.id + "_" + language;
+    var cached_url = Lampa.Storage.get(cache_key);
+
+    if (cached_url && cached_url !== "none") {
+      var img_cache = new Image();
+      img_cache.src = cached_url;
+
+      if (img_cache.complete || Lampa.Storage.get("async_load", true)) {
+        startLogoAnimation(cached_url, true);
+      } else {
+        startLogoAnimation(cached_url, false);
+      }
+    } else {
+      var url =
+        Lampa.TMDB.api(
+          type +
+            "/" +
+            data.id +
+            "/images?api_key=" +
+            Lampa.TMDB.key() +
+            "&include_image_language=" +
+            language +
+            ",en,null",
+        );
+
+      $.get(url, function (data_api) {
+        if (renderId && renderId !== _this.lastRenderId) return;
+
+        var final_logo = null;
+        if (data_api.logos && data_api.logos.length > 0) {
+          for (var i = 0; i < data_api.logos.length; i++) {
+            if (data_api.logos[i].iso_639_1 == language) {
+              final_logo = data_api.logos[i].file_path;
+              break;
+            }
+          }
+          if (!final_logo) {
+            for (var j = 0; j < data_api.logos.length; j++) {
+              if (data_api.logos[j].iso_639_1 == "en") {
+                final_logo = data_api.logos[j].file_path;
+                break;
+              }
+            }
+          }
+          if (!final_logo) final_logo = data_api.logos[0].file_path;
+        }
+
+        if (final_logo) {
+          var img_url = Lampa.TMDB.image(
+            "/t/p/original" + final_logo.replace(".svg", ".png"),
+          );
+          Lampa.Storage.set(cache_key, img_url);
+          startLogoAnimation(img_url, false);
+        } else {
+          Lampa.Storage.set(cache_key, "none");
+        }
+      }).fail(function () {});
+    }
+  }
+};
+
 
     InfoPanel.prototype.load = function (data) {
       if (!data || !data.id) return;
