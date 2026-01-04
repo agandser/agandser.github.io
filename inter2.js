@@ -4,6 +4,7 @@
   if (!window.Lampa) return;
   if (Lampa.Platform && Lampa.Platform.screen && !Lampa.Platform.screen('tv')) return;
 
+  // ----------------- Settings keys -----------------
   var SETTINGS_SHOW = 'cardify_bg_trailer';
   var SETTINGS_SOUND = 'cardify_bg_trailer_sound';
   var SETTINGS_UNMUTED_ONCE = 'cardify_bg_trailer_unmuted_once';
@@ -15,7 +16,7 @@
     } catch (e) { return def; }
   }
 
-  // ---------- Lang ----------
+  // ----------------- Lang -----------------
   try {
     Lampa.Lang.add({
       cardify_bgtrailer_enable: { ru: 'Трейлер в фоне', en: 'Backdrop trailer' },
@@ -24,12 +25,16 @@
     });
   } catch (e) {}
 
-  // ---------- Settings ----------
+  // ----------------- Settings UI -----------------
   try {
     if (Lampa.SettingsApi) {
       var icon = "<svg width=\"36\" height=\"28\" viewBox=\"0 0 36 28\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><rect x=\"1.5\" y=\"1.5\" width=\"33\" height=\"25\" rx=\"3.5\" stroke=\"white\" stroke-width=\"3\"/><rect x=\"5\" y=\"14\" width=\"17\" height=\"4\" rx=\"2\" fill=\"white\"/><rect x=\"5\" y=\"20\" width=\"10\" height=\"3\" rx=\"1.5\" fill=\"white\"/><rect x=\"25\" y=\"20\" width=\"6\" height=\"3\" rx=\"1.5\" fill=\"white\"/></svg>";
 
-      Lampa.SettingsApi.addComponent({ component: 'cardify_bgtrailer', icon: icon, name: 'Backdrop Trailer' });
+      Lampa.SettingsApi.addComponent({
+        component: 'cardify_bgtrailer',
+        icon: icon,
+        name: 'Backdrop Trailer'
+      });
 
       Lampa.SettingsApi.addParam({
         component: 'cardify_bgtrailer',
@@ -45,34 +50,84 @@
     }
   } catch (e) {}
 
-  // ---------- CSS (ВАЖНО: слой фиксированный, UI не трогаем) ----------
+  // ----------------- CSS (minimalistic) -----------------
   var css = [
     "<style>",
+    /* Сам слой с видео — фиксированный, не ломает разметку */
     ".cardify-bgtrailer{position:fixed;inset:-12% 0;overflow:hidden;pointer-events:none;opacity:0;transition:opacity .45s ease;z-index:1;}",
     "body.bgtrailer-on .cardify-bgtrailer{opacity:1;}",
+
     ".cardify-bgtrailer__host{position:absolute;inset:0;}",
     ".cardify-bgtrailer iframe{position:absolute;top:50%;left:50%;width:160vw;height:90vw;min-width:100%;min-height:100%;transform:translate(-50%,-50%);border:0;}",
-    ".cardify-bgtrailer__shade{position:absolute;inset:0;background:linear-gradient(90deg, rgba(0,0,0,.62) 0%, rgba(0,0,0,.25) 45%, rgba(0,0,0,.62) 100%);}",
-    ".cardify-bgtrailer__vignette{position:absolute;inset:0;background:radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 0%, rgba(0,0,0,.35) 75%, rgba(0,0,0,.62) 100%);}",
-    ".cardify-bgtrailer__hint{position:fixed;right:1.2em;bottom:1.2em;display:flex;align-items:center;gap:.7em;padding:.65em 1em;border-radius:1.6em;background:rgba(0,0,0,.45);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);opacity:0;transform:translate3d(0,10px,0);transition:all .3s ease;z-index:3;}",
-    ".cardify-bgtrailer__hint.show{opacity:1;transform:translate3d(0,0,0);}",
-    ".cardify-bgtrailer__hint svg{width:1.6em;height:1.6em;opacity:.9;}",
-    ".cardify-bgtrailer__hint span{font-size:1.1em;opacity:.95;}",
 
-    // Когда видео реально пошло — прячем статический фон (но НЕ двигаем раскладку)
+    /* МИНИМАЛИСТИЧНОЕ затемнение под читаемость */
+    ".cardify-bgtrailer__shade{position:absolute;inset:0;",
+      "background:linear-gradient(90deg, rgba(0,0,0,.32) 0%, rgba(0,0,0,.10) 55%, rgba(0,0,0,.22) 100%);",
+    "}",
+
+    /* Очень лёгкая виньетка */
+    ".cardify-bgtrailer__vignette{position:absolute;inset:0;",
+      "background:radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 0%, rgba(0,0,0,.10) 72%, rgba(0,0,0,.18) 100%);",
+    "}",
+
+    /* Подсказка звука — аккуратная */
+    ".cardify-bgtrailer__hint{position:fixed;right:1.2em;bottom:1.2em;display:flex;align-items:center;gap:.7em;",
+    "padding:.55em .95em;border-radius:1.6em;background:rgba(0,0,0,.25);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);",
+    "opacity:0;transform:translate3d(0,10px,0);transition:all .3s ease;z-index:3;}",
+    ".cardify-bgtrailer__hint.show{opacity:.85;transform:translate3d(0,0,0);}",
+    ".cardify-bgtrailer__hint svg{width:1.5em;height:1.5em;opacity:.9;}",
+    ".cardify-bgtrailer__hint span{font-size:1.05em;opacity:.95;}",
+
+    /* Когда видео реально играет — прячем статический фон (без сдвигов) */
     "body.bgtrailer-on .full-start__background{opacity:0 !important;}",
-    // Контент выше видео
     "body.bgtrailer-on .full-start, body.bgtrailer-on .full-start-new{position:relative;z-index:2;}",
+
+    /* Минимализм текста: скрываем “Подробно/описание” пока трейлер активен */
+    "body.bgtrailer-on .full-start__description,",
+    "body.bgtrailer-on .full-start-new__description,",
+    "body.bgtrailer-on .full-start__text,",
+    "body.bgtrailer-on .full-start-new__text,",
+    "body.bgtrailer-on .full-start__about,",
+    "body.bgtrailer-on .full-start__more,",
+    "body.bgtrailer-on .full-start__details + .full-start__line,",
+    "body.bgtrailer-on .full-start-new__details + .full-start-new__line,",
+    "body.bgtrailer-on .full-start__body-bottom,",
+    "body.bgtrailer-on .full-start-new__body-bottom{",
+      "opacity:0 !important;",
+      "max-height:0 !important;",
+      "overflow:hidden !important;",
+      "margin:0 !important;",
+      "padding:0 !important;",
+      "pointer-events:none !important;",
+      "transition:all .35s ease !important;",
+    "}",
+
+    /* Возврат обратно, когда трейлер не активен */
+    "body:not(.bgtrailer-on) .full-start__description,",
+    "body:not(.bgtrailer-on) .full-start-new__description,",
+    "body:not(.bgtrailer-on) .full-start__text,",
+    "body:not(.bgtrailer-on) .full-start-new__text,",
+    "body:not(.bgtrailer-on) .full-start__about,",
+    "body:not(.bgtrailer-on) .full-start__more,",
+    "body:not(.bgtrailer-on) .full-start__body-bottom,",
+    "body:not(.bgtrailer-on) .full-start-new__body-bottom{",
+      "opacity:1 !important;",
+      "max-height:2000px !important;",
+      "transition:all .35s ease !important;",
+    "}",
+
     "</style>"
   ].join("\n");
+
   try { $('body').append(css); } catch (e) {}
 
-  // ---------- YouTube API loader ----------
+  // ----------------- YouTube API loader -----------------
   var ytWaiters = [];
   var ytLoading = false;
 
   function ensureYT(cb) {
     if (window.YT && YT.Player) return cb();
+
     ytWaiters.push(cb);
     if (ytLoading) return;
     ytLoading = true;
@@ -90,7 +145,7 @@
     };
   }
 
-  // ---------- Trailer picker ----------
+  // ----------------- Trailer picker -----------------
   function pickTrailer(data) {
     if (!data || !data.videos || !data.videos.results || !data.videos.results.length) return null;
 
@@ -98,16 +153,16 @@
     data.videos.results.forEach(function (el) {
       if (!el || !el.key) return;
       items.push({
-        title: (el.name || '').slice(0, 80),
         id: el.key,
         code: el.iso_639_1 || '',
-        time: el.published_at ? new Date(el.published_at).getTime() : 0
+        time: el.published_at ? new Date(el.published_at).getTime() : 0,
+        name: el.name || ''
       });
     });
 
     if (!items.length) return null;
 
-    items.sort(function (a, b) { return (a.time > b.time ? -1 : a.time < b.time ? 1 : 0); });
+    items.sort(function (a, b) { return a.time > b.time ? -1 : a.time < b.time ? 1 : 0; });
 
     var lang = '';
     try { lang = Lampa.Storage.field('tmdb_lang') || ''; } catch (e) {}
@@ -120,10 +175,10 @@
     pool = pool.concat(byEn);
     if (!pool.length) pool = items;
 
-    return pool[0];
+    return pool[0] || null;
   }
 
-  // ---------- Backdrop Trailer (фикс-слой) ----------
+  // ----------------- Backdrop Trailer class -----------------
   function BackdropTrailer(fullObject, trailer) {
     var self = this;
 
@@ -134,8 +189,8 @@
     this.destroyed = false;
     this.started = false;
 
-    this.autoSound = !!safeField(SETTINGS_SOUND, true);
     this.showEnabled = !!safeField(SETTINGS_SHOW, true);
+    this.autoSound = !!safeField(SETTINGS_SOUND, true);
 
     this.wrap = $([
       '<div class="cardify-bgtrailer">',
@@ -157,19 +212,19 @@
 
     this.host = this.wrap.find('.cardify-bgtrailer__host');
 
-    // Вклеиваем в body (НЕ в background!)
     $('body').append(this.wrap).append(this.hint);
 
-    // События жизненного цикла
     this.onActivity = function (e) {
       if (!e || e.type !== 'destroy') return;
       if (e.object && e.object.activity === self.activity) self.destroy();
     };
+
     this.onToggle = function () {
       if (self.destroyed) return;
       if (!self.isOnThisFullStart()) self.pause(true);
       else self.play();
     };
+
     this.onAnyKeyDown = function () {
       self.tryUnmute(true);
       self.detachAnyKey();
@@ -195,7 +250,7 @@
     var self = this;
     if (!window.YT || !YT.Player) return this.destroy();
 
-    // autoplay надёжнее со startMuted, потом пытаемся снять mute
+    // autoplay надёжнее со стартом muted, потом снимаем mute
     var startMuted = true;
 
     this.player = new YT.Player(this.host[0], {
@@ -230,16 +285,12 @@
 
           if (st.data === YT.PlayerState.PLAYING) {
             self.started = true;
-
-            // ВАЖНО: только когда реально PLAYING — включаем режим “видео вместо статики”
             document.body.classList.add('bgtrailer-on');
 
-            // Звук
             if (self.autoSound) {
               var already = !!safeField(SETTINGS_UNMUTED_ONCE, false);
               self.tryUnmute(already);
 
-              // Если всё ещё muted — покажем подсказку и ждём кнопку
               setTimeout(function () {
                 if (self.destroyed || !self.player) return;
                 try {
@@ -284,6 +335,7 @@
 
   BackdropTrailer.prototype.tryUnmute = function (aggressive) {
     if (!this.player || !this.autoSound) return;
+
     try {
       if (this.player.unMute) this.player.unMute();
       if (this.player.setVolume) this.player.setVolume(100);
@@ -327,7 +379,7 @@
     try { this.activity.bg_trailer_ready = false; } catch (e) {}
   };
 
-  // ---------- Hook ----------
+  // ----------------- Hook -----------------
   Lampa.Listener.follow('full', function (e) {
     try {
       var ok = e && (e.type === 'complite' || e.type === 'complete');
@@ -335,10 +387,10 @@
 
       if (!safeField(SETTINGS_SHOW, true)) return;
 
-      // Только на активной карточке
+      // только для активной карточки
       if (Lampa.Activity.active().activity !== e.object.activity) return;
 
-      // Дубль-защита
+      // защита от дубля
       if (e.object.activity.bg_trailer_ready) return;
 
       var trailer = pickTrailer(e.data);
