@@ -1,16 +1,10 @@
 (function () {
   'use strict';
 
-  // ==========================================================
-  // Shikimori Fan Hub (TMDB ONLY via Lampa.TMDB.api proxy)
-  // Требование: TMDB proxy (Lampac/прокси) включён в системе.
-  // Если TMDB идёт напрямую на api.themoviedb.org -> ошибка и выход.
-  // ==========================================================
+  if (window.plugin_shikifan_hub_proxy_ready_v2) return;
+  window.plugin_shikifan_hub_proxy_ready_v2 = true;
 
-  if (window.plugin_shikifan_hub_proxy_ready) return;
-  window.plugin_shikifan_hub_proxy_ready = true;
-
-  var PLUGIN_NAME = 'Shikimori Fan Hub (Proxy TMDB)';
+  var PLUGIN_NAME = 'Shikimori Fan Hub (Lampac required)';
   var COMPONENT_HUB = 'ShikiFanHubProxy';
   var COMPONENT_ANIME = 'ShikiAnimeProxy';
 
@@ -18,16 +12,19 @@
   var SHIKI_API_V1 = SHIKI_ORIGIN + '/api';
   var SHIKI_API_V2 = SHIKI_ORIGIN + '/api/v2';
 
-  // Опционально для повышения точности: MAL -> IMDb -> TMDB /find
   var ARM_IDS = 'https://arm.haglund.dev/api/v2/ids';
 
-  // Storage keys
   var SKEY_TOKEN = 'shikifan.token';
   var SKEY_CENSORED = 'shikifan.censored';
 
-  // -------------------------
-  // Helpers
-  // -------------------------
+  function notify(txt) {
+    try { Lampa.Noty.show(txt); } catch (e) { console.log('[ShikiFanHub]', txt); }
+  }
+
+  function safeLang() {
+    try { return Lampa.Storage.field('language') || 'ru'; } catch (e) { return 'ru'; }
+  }
+
   function sget(key, def) {
     try {
       var v = Lampa.Storage.get(key);
@@ -44,16 +41,6 @@
   function bget(key, def) {
     var v = sget(key, def ? 'true' : 'false');
     return v === true || v === 'true' || v === 1 || v === '1';
-  }
-
-  function notify(txt) {
-    try { Lampa.Noty.show(txt); }
-    catch (e) { console.log('[Noty]', txt); }
-  }
-
-  function safeLang() {
-    try { return Lampa.Storage.field('language') || 'ru'; }
-    catch (e) { return 'ru'; }
   }
 
   function cleanText(html) {
@@ -95,93 +82,6 @@
     return base + path + (params ? buildQuery(params) : '');
   }
 
-  function askText(title, value) {
-    return new Promise(function (resolve) {
-      if (Lampa.Input && Lampa.Input.show) {
-        Lampa.Input.show({
-          title: title,
-          value: value || '',
-          free: true,
-          confirm: function (v) { resolve(v); },
-          cancel: function () { resolve(null); }
-        });
-        return;
-      }
-      var v2 = prompt(title, value || '');
-      resolve(v2 === null ? null : v2);
-    });
-  }
-
-  // -------------------------
-  // Rate limiter (мягко, чтобы не душить Shikimori)
-  // -------------------------
-  function RateLimiter(minGapMs) {
-    this.minGapMs = minGapMs || 700;
-    this.queue = [];
-    this.busy = false;
-    this.lastAt = 0;
-  }
-
-  RateLimiter.prototype.push = function (fn) {
-    var self = this;
-    return new Promise(function (resolve, reject) {
-      self.queue.push({ fn: fn, resolve: resolve, reject: reject });
-      self._pump();
-    });
-  };
-
-  RateLimiter.prototype._pump = function () {
-    var self = this;
-    if (self.busy) return;
-    if (!self.queue.length) return;
-
-    var now = Date.now();
-    var wait = Math.max(0, self.minGapMs - (now - self.lastAt));
-
-    self.busy = true;
-    setTimeout(function () {
-      var job = self.queue.shift();
-      self.lastAt = Date.now();
-      Promise.resolve()
-        .then(job.fn)
-        .then(function (res) { self.busy = false; job.resolve(res); self._pump(); })
-        .catch(function (err) { self.busy = false; job.reject(err); self._pump(); });
-    }, wait);
-  };
-
-  var limiter = new RateLimiter(700);
-
-  // -------------------------
-  // Cache (Storage) - TTL
-  // -------------------------
-  function cacheKey(url) { return 'shikifan.cache.' + (Lampa.Utils ? Lampa.Utils.hash(url) : url); }
-
-  function cacheGet(url) {
-    var key = cacheKey(url);
-    try {
-      var raw = Lampa.Storage.get(key);
-      if (!raw) return null;
-      var obj = JSON.parse(raw);
-      if (!obj || !obj.exp || Date.now() > obj.exp) return null;
-      return obj.data;
-    } catch (e) {
-      return null;
-    }
-  }
-
-  function cacheSet(url, data, ttlMs) {
-    var key = cacheKey(url);
-    try {
-      Lampa.Storage.set(key, JSON.stringify({
-        exp: Date.now() + (ttlMs || 5 * 60 * 1000),
-        data: data
-      }));
-    } catch (e) {}
-  }
-
-  // -------------------------
-  // AJAX JSON
-  // -------------------------
   function ajaxJSON(opt) {
     return new Promise(function (resolve, reject) {
       $.ajax({
@@ -193,30 +93,54 @@
         data: opt.data,
         headers: opt.headers || {},
         success: function (data) { resolve(data); },
-        error: function (jq, status, err) {
-          reject({ status: jq.status, text: jq.responseText, err: err });
+        error: function (jq) {
+          reject({ status: jq.status, text: jq.responseText, jq: jq });
         }
       });
     });
   }
 
-  // ==========================================================
-  // TMDB via Lampa.TMDB.api ONLY (Proxy required)
-  // ==========================================================
-  function tmdbApiUrl(pathWithQuery) {
+  // -------------------------
+  // TMDB: как в "других" плагинах
+  // Lampa.TMDB.api(...) + api_key=Lampa.TMDB.key()
+  // -------------------------
+  function tmdbKey() {
+    try {
+      return (Lampa.TMDB && typeof Lampa.TMDB.key === 'function') ? (Lampa.TMDB.key() || '') : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function tmdbPath(path, params) {
+    // path: 'search/multi' or 'movie/123' etc
+    // params: {query:..., language:...}
+    var p = params || {};
+
+    // обязательно добавляем key как делают другие плагины
+    if (p.api_key === undefined) p.api_key = tmdbKey();
+    if (p.language === undefined) p.language = safeLang();
+
+    var qs = buildQuery(p);
+    var full = path + qs;
+
+    // если в path уже вручную есть api_key= - не дублируем
+    if (full.indexOf('api_key=') === -1) {
+      var k = tmdbKey();
+      full += (full.indexOf('?') > -1 ? '&' : '?') + 'api_key=' + encodeURIComponent(k);
+    }
+
+    return full;
+  }
+
+  function tmdbApiUrl(path, params) {
     if (!Lampa.TMDB || typeof Lampa.TMDB.api !== 'function') return '';
-    return Lampa.TMDB.api(pathWithQuery);
+    return Lampa.TMDB.api(tmdbPath(path, params));
   }
 
   function isTmdbProxyActive() {
-    try {
-      var u = tmdbApiUrl('configuration');
-      if (!u) return false;
-      // Если это прямой TMDB — запрещаем
-      return u.indexOf('api.themoviedb.org/3/') === -1;
-    } catch (e) {
-      return false;
-    }
+    // ты просил "только lampac иначе ошибка"
+    try { return !!Lampa.Storage.field('proxy_tmdb'); } catch (e) { return false; }
   }
 
   var __tmdb_proxy_ok = false;
@@ -225,104 +149,90 @@
     if (__tmdb_proxy_ok) return Promise.resolve(true);
 
     if (!Lampa.TMDB || typeof Lampa.TMDB.api !== 'function') {
-      notify('TMDB: не найден Lampa.TMDB.api(). Нужен Lampac/прокси TMDB.');
+      notify('TMDB: нет Lampa.TMDB.api().');
       return Promise.reject('NO_LAMPA_TMDB_API');
     }
 
     if (!isTmdbProxyActive()) {
-      notify('TMDB: прокси не активен. Включи proxy_tmdb / Lampac TMDB proxy (иначе плагин не работает).');
+      notify('Нужен Lampac/Proxy TMDB: включи proxy_tmdb (иначе плагин не работает).');
       return Promise.reject('PROXY_DISABLED');
     }
 
-    // preflight
-    var test = tmdbApiUrl('configuration' + buildQuery({ language: safeLang() }));
-    return ajaxJSON({ url: test, method: 'GET' })
+    var key = tmdbKey();
+    if (!key) {
+      // у тебя прокси явно требует ключ, иначе 401
+      notify('TMDB: пустой api_key. Задай ключ TMDB (чтобы Lampa.TMDB.key() возвращал его).');
+      return Promise.reject('TMDB_KEY_EMPTY');
+    }
+
+    var testUrl = tmdbApiUrl('configuration', {});
+
+    return ajaxJSON({ url: testUrl, method: 'GET' })
       .then(function () {
         __tmdb_proxy_ok = true;
         return true;
       })
       .catch(function (e) {
-        var code = e && e.status ? e.status : 0;
-        if (code === 401) notify('TMDB proxy: 401 (на прокси/лампак не настроен tmdb api key).');
-        else if (code === 404) notify('TMDB proxy: 404 (не найден роут /tmdb/api/3 или аналог).');
-        else notify('TMDB proxy: ошибка соединения.');
+        if (e && e.status === 401) notify('TMDB proxy: 401 (прокси не принимает/не видит api_key).');
+        else notify('TMDB proxy: ошибка (' + (e && e.status ? e.status : 'unknown') + ')');
         return Promise.reject('PROXY_PRECHECK_FAIL');
       });
   }
 
   function tmdbGet(path, params) {
     return ensureTmdbProxyReady().then(function () {
-      var url = tmdbApiUrl(path + buildQuery(params || {}));
+      var url = tmdbApiUrl(path, params || {});
       return ajaxJSON({ url: url, method: 'GET' });
     });
   }
 
-  // ==========================================================
-  // Shikimori API wrappers
-  // ==========================================================
-  function shikiGetV1(path, params, ttlMs) {
+  // -------------------------
+  // Shikimori V1/V2
+  // -------------------------
+  function shikiGetV1(path, params) {
     var url = buildUrl(SHIKI_API_V1, path, params);
-    var cached = cacheGet(url);
-    if (cached) return Promise.resolve(cached);
-
-    return limiter.push(function () {
-      return ajaxJSON({ url: url, method: 'GET' }).then(function (data) {
-        cacheSet(url, data, ttlMs || 5 * 60 * 1000);
-        return data;
-      });
-    });
+    return ajaxJSON({ url: url, method: 'GET' });
   }
 
   function shikiGetV2(path, params, auth) {
     var url = buildUrl(SHIKI_API_V2, path, params);
-    return limiter.push(function () {
-      return ajaxJSON({
-        url: url,
-        method: 'GET',
-        headers: auth ? { 'Authorization': 'Bearer ' + auth } : {}
-      });
+    return ajaxJSON({
+      url: url,
+      method: 'GET',
+      headers: auth ? { 'Authorization': 'Bearer ' + auth } : {}
     });
   }
 
   function shikiPostV2(path, body, auth) {
     var url = buildUrl(SHIKI_API_V2, path, null);
-    return limiter.push(function () {
-      return ajaxJSON({
-        url: url,
-        method: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify(body),
-        headers: auth ? { 'Authorization': 'Bearer ' + auth } : {}
-      });
+    return ajaxJSON({
+      url: url,
+      method: 'POST',
+      contentType: 'application/json',
+      data: JSON.stringify(body),
+      headers: auth ? { 'Authorization': 'Bearer ' + auth } : {}
     });
   }
 
   function shikiPatchV2(path, body, auth) {
     var url = buildUrl(SHIKI_API_V2, path, null);
-    return limiter.push(function () {
-      return ajaxJSON({
-        url: url,
-        method: 'PATCH',
-        contentType: 'application/json',
-        data: JSON.stringify(body),
-        headers: auth ? { 'Authorization': 'Bearer ' + auth } : {}
-      });
+    return ajaxJSON({
+      url: url,
+      method: 'PATCH',
+      contentType: 'application/json',
+      data: JSON.stringify(body),
+      headers: auth ? { 'Authorization': 'Bearer ' + auth } : {}
     });
   }
 
   function shikiWhoami(auth) {
-    return limiter.push(function () {
-      return ajaxJSON({
-        url: SHIKI_API_V1 + '/users/whoami',
-        method: 'GET',
-        headers: { 'Authorization': 'Bearer ' + auth }
-      });
+    return ajaxJSON({
+      url: SHIKI_API_V1 + '/users/whoami',
+      method: 'GET',
+      headers: { 'Authorization': 'Bearer ' + auth }
     });
   }
 
-  // ==========================================================
-  // My lists (user_rates)
-  // ==========================================================
   function ensureAuth() {
     var token = String(sget(SKEY_TOKEN, '') || '').trim();
     if (!token) return Promise.reject('TOKEN_MISSING');
@@ -368,9 +278,14 @@
     });
   }
 
-  // ==========================================================
-  // TMDB open in Lampa
-  // ==========================================================
+  // -------------------------
+  // Mapping to TMDB and open in Lampa
+  // -------------------------
+  function armIdsByMal(malId) {
+    var url = buildUrl(ARM_IDS, '', { source: 'myanimelist', id: malId });
+    return ajaxJSON({ url: url, method: 'GET' });
+  }
+
   function pickTmdbFromFind(findRes, kind) {
     if (!findRes) return null;
     var tv = findRes.tv_results || [];
@@ -382,38 +297,18 @@
     return null;
   }
 
-  function armIdsByMal(malId) {
-    var url = buildUrl(ARM_IDS, '', { source: 'myanimelist', id: malId });
-    return ajaxJSON({ url: url, method: 'GET' });
-  }
-
   function openInLampaByAnime(animeId) {
-    return ensureTmdbProxyReady().then(function () {
-      return shikiGetV1('/animes/' + animeId, null, 10 * 60 * 1000);
-    }).then(function (anime) {
-      var kind = anime.kind || 'tv';
-      var title = anime.name || anime.russian || anime.english || '';
-      var year = (anime.aired_on && String(anime.aired_on).slice(0, 4)) || '';
-      var mal = anime.myanimelist_id || null;
+    return ensureTmdbProxyReady()
+      .then(function () { return shikiGetV1('/animes/' + animeId, null); })
+      .then(function (anime) {
+        var kind = anime.kind || 'tv';
+        var title = anime.name || anime.russian || anime.english || '';
+        var year = (anime.aired_on && String(anime.aired_on).slice(0, 4)) || '';
+        var mal = anime.myanimelist_id || null;
 
-      // 1) MAL -> IMDb -> TMDB find
-      if (mal) {
-        return armIdsByMal(mal).then(function (ids) {
-          if (ids && ids.imdb) {
-            return tmdbGet('find/' + ids.imdb, {
-              external_source: 'imdb_id',
-              language: safeLang()
-            }).then(function (findRes) {
-              var picked = pickTmdbFromFind(findRes, kind);
-              if (picked) return picked;
-              throw new Error('TMDB_FIND_EMPTY');
-            });
-          }
-          throw new Error('NO_IMDB');
-        }).catch(function () {
-          // 2) fallback: search
+        function searchFallback() {
           var path = (kind === 'movie') ? 'search/movie' : 'search/tv';
-          var p = { query: title, language: safeLang() };
+          var p = { query: title };
           if (kind === 'movie' && year) p.year = year;
           if (kind !== 'movie' && year) p.first_air_date_year = year;
 
@@ -425,58 +320,69 @@
               card: sr.results[0]
             };
           });
-        });
-      }
+        }
 
-      // MAL нет -> search
-      var path2 = (kind === 'movie') ? 'search/movie' : 'search/tv';
-      return tmdbGet(path2, { query: title, language: safeLang() }).then(function (sr2) {
-        if (!sr2 || !sr2.results || !sr2.results.length) throw new Error('TMDB_SEARCH_EMPTY');
-        return {
-          id: sr2.results[0].id,
-          method: (kind === 'movie') ? 'movie' : 'tv',
-          card: sr2.results[0]
-        };
+        if (!mal) return searchFallback();
+
+        return armIdsByMal(mal).then(function (ids) {
+          if (ids && ids.imdb) {
+            return tmdbGet('find/' + ids.imdb, { external_source: 'imdb_id' }).then(function (findRes) {
+              var picked = pickTmdbFromFind(findRes, kind);
+              if (picked) return picked;
+              return searchFallback();
+            });
+          }
+          return searchFallback();
+        }).catch(function () {
+          return searchFallback();
+        });
+      })
+      .then(function (picked) {
+        Lampa.Activity.push({
+          url: '',
+          component: 'full',
+          id: picked.id,
+          method: picked.method,
+          card: picked.card
+        });
+      })
+      .catch(function (e) {
+        if (e && e.message) notify(e.message);
       });
-    }).then(function (picked) {
-      Lampa.Activity.push({
-        url: '',
-        component: 'full',
-        id: picked.id,
-        method: picked.method,
-        card: picked.card
-      });
-    }).catch(function (e) {
-      if (e && e.message) notify(e.message);
-    });
   }
 
-  // ==========================================================
-  // Settings
-  // ==========================================================
-  function clearCache() {
-    try {
-      var all = Lampa.Storage.all();
-      for (var k in all) {
-        if (k.indexOf('shikifan.cache.') === 0) Lampa.Storage.set(k, '');
+  // -------------------------
+  // Settings UI
+  // -------------------------
+  function askText(title, value) {
+    return new Promise(function (resolve) {
+      if (Lampa.Input && Lampa.Input.show) {
+        Lampa.Input.show({
+          title: title,
+          value: value || '',
+          free: true,
+          confirm: function (v) { resolve(v); },
+          cancel: function () { resolve(null); }
+        });
+        return;
       }
-    } catch (e) {}
+      var v2 = prompt(title, value || '');
+      resolve(v2 === null ? null : v2);
+    });
   }
 
   function openSettings() {
     var token = String(sget(SKEY_TOKEN, '') || '').trim();
     var censored = bget(SKEY_CENSORED, true);
-
-    var proxyUrl = tmdbApiUrl('configuration') || '(нет Lampa.TMDB.api)';
-    var proxyMode = isTmdbProxyActive() ? 'proxy' : 'direct';
+    var key = tmdbKey();
 
     Lampa.Select.show({
       title: PLUGIN_NAME + ' — Settings',
       items: [
         { title: 'Shikimori token (Bearer)', subtitle: token ? 'задан' : 'не задан', key: 'token' },
         { title: 'Censored', subtitle: censored ? 'true' : 'false', key: 'censored' },
-        { title: 'TMDB mode', subtitle: proxyMode + ' • ' + proxyUrl, key: 'check' },
-        { title: 'Очистить кэш', subtitle: 'локальный кэш запросов', key: 'clear' }
+        { title: 'TMDB key (Lampa.TMDB.key())', subtitle: key ? 'есть' : 'пусто', key: 'tmdbkey' },
+        { title: 'TMDB preflight', subtitle: 'проверить прокси', key: 'check' }
       ],
       onBack: function () { Lampa.Controller.toggle('content'); },
       onSelect: function (a) {
@@ -487,29 +393,26 @@
             notify('Token сохранён');
           });
         }
-
         if (a.key === 'censored') {
           sset(SKEY_CENSORED, censored ? 'false' : 'true');
           notify('Censored: ' + (censored ? 'false' : 'true'));
         }
-
         if (a.key === 'check') {
+          __tmdb_proxy_ok = false;
           ensureTmdbProxyReady()
             .then(function () { notify('TMDB proxy: OK'); })
             .catch(function () {});
         }
-
-        if (a.key === 'clear') {
-          clearCache();
-          notify('Кэш очищен');
+        if (a.key === 'tmdbkey') {
+          notify('Ключ берётся из настроек Lampa (Lampa.TMDB.key()).');
         }
       }
     });
   }
 
-  // ==========================================================
+  // -------------------------
   // Templates + styles
-  // ==========================================================
+  // -------------------------
   Lampa.Template.add('ShikiFanHubProxyStyle',
     "<style>" +
       ".shikifan-head{margin-left:1.5em}" +
@@ -574,9 +477,6 @@
 
   $('body').append(Lampa.Template.get('ShikiFanHubProxyStyle', {}, true));
 
-  // ==========================================================
-  // Card
-  // ==========================================================
   function ShikiCard(anime) {
     var badge = anime.aired_on ? String(anime.aired_on).slice(0, 4) : ' ';
     var badge2 = anime.status || ' ';
@@ -593,9 +493,9 @@
     this.destroy = function () { try { item.remove(); } catch (e) {} };
   }
 
-  // ==========================================================
-  // HUB component
-  // ==========================================================
+  // -------------------------
+  // HUB
+  // -------------------------
   function ShikiFanHub(object) {
     var self = this;
 
@@ -611,7 +511,6 @@
     "</div>");
 
     var body = $("<div class='shikifan-list category-full'></div>");
-
     var items = [];
     var lastFocus = null;
 
@@ -647,52 +546,43 @@
     }
 
     function loadHome() {
-      var params = {
+      shikiGetV1('/animes', {
         page: state.page,
         limit: 36,
         order: 'popularity',
         censored: bget(SKEY_CENSORED, true) ? 'true' : 'false'
-      };
-
-      shikiGetV1('/animes', params, 2 * 60 * 1000)
-        .then(function (list) { appendAnimes(list); self.activity.loader(false); self.activity.toggle(); })
-        .catch(function () { self.empty(); });
+      }).then(function (list) {
+        appendAnimes(list);
+        self.activity.loader(false);
+        self.activity.toggle();
+      }).catch(function () { self.empty(); });
     }
 
     function loadSearch() {
-      var params = {
+      shikiGetV1('/animes', {
         page: state.page,
         limit: 36,
         order: 'popularity',
         search: state.query,
         censored: bget(SKEY_CENSORED, true) ? 'true' : 'false'
-      };
-
-      shikiGetV1('/animes', params, 60 * 1000)
-        .then(function (list) { appendAnimes(list); self.activity.loader(false); self.activity.toggle(); })
-        .catch(function () { self.empty(); });
-    }
-
-    function loadCalendar() {
-      var url = buildUrl(SHIKI_API_V1, '/calendar', { censored: bget(SKEY_CENSORED, true) ? 'true' : 'false' });
-      var cached = cacheGet(url);
-
-      var p = cached ? Promise.resolve(cached) : limiter.push(function () {
-        return ajaxJSON({ url: url, method: 'GET' }).then(function (data) {
-          cacheSet(url, data, 5 * 60 * 1000);
-          return data;
-        });
-      });
-
-      p.then(function (days) {
-        var flat = [];
-        (days || []).forEach(function (row) {
-          if (row && row.anime) flat.push(row.anime);
-        });
-        appendAnimes(flat);
+      }).then(function (list) {
+        appendAnimes(list);
         self.activity.loader(false);
         self.activity.toggle();
       }).catch(function () { self.empty(); });
+    }
+
+    function loadCalendar() {
+      shikiGetV1('/calendar', { censored: bget(SKEY_CENSORED, true) ? 'true' : 'false' })
+        .then(function (days) {
+          var flat = [];
+          (days || []).forEach(function (row) {
+            if (row && row.anime) flat.push(row.anime);
+          });
+          appendAnimes(flat);
+          self.activity.loader(false);
+          self.activity.toggle();
+        }).catch(function () { self.empty(); });
     }
 
     function loadMy(status) {
@@ -708,14 +598,14 @@
             limit: 50,
             order: 'popularity',
             censored: bget(SKEY_CENSORED, true) ? 'true' : 'false'
-          }, 2 * 60 * 1000);
+          });
         });
       }).then(function (list) {
         appendAnimes(list || []);
         self.activity.loader(false);
         self.activity.toggle();
       }).catch(function () {
-        notify('Нужен token (Settings → Shikimori token)');
+        notify('Нужен Shikimori token (Settings → Shikimori token)');
         self.empty();
       });
     }
@@ -738,7 +628,7 @@
           }
         });
       }).catch(function () {
-        notify('Нужен token (Settings → Shikimori token)');
+        notify('Нужен Shikimori token (Settings → Shikimori token)');
       });
     }
 
@@ -767,15 +657,7 @@
       });
     }
 
-    function setupPaging(loaderFn) {
-      scroll.onEnd = function () {
-        state.page += 1;
-        loaderFn();
-      };
-    }
-
     this.create = function () {
-      // Жёсткое требование: если нет TMDB proxy — дальше не работаем вообще
       ensureTmdbProxyReady().then(function () {
         attachHead();
         clearList();
@@ -785,17 +667,24 @@
           if (step > 0) Navigator.move('down'); else Navigator.move('up');
         };
 
+        scroll.onEnd = function () {
+          if (state.mode === 'calendar' || state.mode === 'my') return;
+          state.page += 1;
+          if (state.mode === 'search') loadSearch();
+          else loadHome();
+        };
+
         scroll.append(head);
         scroll.append(body);
         html.append(scroll.render(true));
 
         self.activity.loader(true);
 
-        if (state.mode === 'home') { setupPaging(loadHome); loadHome(); }
-        else if (state.mode === 'search') { setupPaging(loadSearch); loadSearch(); }
-        else if (state.mode === 'calendar') { scroll.onEnd = function () {}; loadCalendar(); }
-        else if (state.mode === 'my') { scroll.onEnd = function () {}; loadMy(state.my_status || 'watching'); }
-        else { setupPaging(loadHome); loadHome(); }
+        if (state.mode === 'home') loadHome();
+        else if (state.mode === 'search') loadSearch();
+        else if (state.mode === 'calendar') loadCalendar();
+        else if (state.mode === 'my') loadMy(state.my_status || 'watching');
+        else loadHome();
 
         self.start();
       }).catch(function () {
@@ -840,9 +729,9 @@
     };
   }
 
-  // ==========================================================
-  // ANIME component (detail + actions)
-  // ==========================================================
+  // -------------------------
+  // ANIME PAGE
+  // -------------------------
   function ShikiAnime(object) {
     var self = this;
 
@@ -951,9 +840,8 @@
       var animeId = object.anime_id;
       if (!animeId) return self.empty();
 
-      // TMDB proxy требуем глобально; но для страницы аниме тоже проверим
       ensureTmdbProxyReady().then(function () {
-        return shikiGetV1('/animes/' + animeId, null, 10 * 60 * 1000);
+        return shikiGetV1('/animes/' + animeId, null);
       }).then(build).catch(function () { self.empty(); });
     };
 
@@ -992,9 +880,9 @@
     };
   }
 
-  // ==========================================================
-  // Menu + start
-  // ==========================================================
+  // -------------------------
+  // Menu
+  // -------------------------
   function addMenuButton() {
     var btn = $(
       "<li class='menu__item selector'>" +
@@ -1020,11 +908,14 @@
     Lampa.Component.add(COMPONENT_HUB, ShikiFanHub);
     Lampa.Component.add(COMPONENT_ANIME, ShikiAnime);
 
-    if (window.appready) addMenuButton();
-    else {
+    if (window.appready) reveal(); else {
       Lampa.Listener.follow('app', function (e) {
-        if (e.type === 'ready') addMenuButton();
+        if (e.type === 'ready') reveal();
       });
+    }
+
+    function reveal() {
+      addMenuButton();
     }
   }
 
