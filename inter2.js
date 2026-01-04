@@ -1,7 +1,6 @@
 (function () {
   'use strict';
 
-  // Работает в Lampa (TV-режим предпочтительно)
   if (!window.Lampa) return;
   if (Lampa.Platform && Lampa.Platform.screen && !Lampa.Platform.screen('tv')) return;
 
@@ -9,21 +8,19 @@
   var SETTINGS_SOUND = 'cardify_bg_trailer_sound';
   var SETTINGS_UNMUTED_ONCE = 'cardify_bg_trailer_unmuted_once';
 
+  function safeField(key, def) {
+    try {
+      var v = Lampa.Storage.field(key);
+      return typeof v === 'undefined' ? def : v;
+    } catch (e) { return def; }
+  }
+
   // ---------- Lang ----------
   try {
     Lampa.Lang.add({
-      cardify_bgtrailer_enable: {
-        ru: 'Трейлер в фоне',
-        en: 'Backdrop trailer'
-      },
-      cardify_bgtrailer_sound: {
-        ru: 'Трейлер со звуком',
-        en: 'Trailer with sound'
-      },
-      cardify_bgtrailer_press_any: {
-        ru: 'Нажмите любую кнопку для звука',
-        en: 'Press any key for sound'
-      }
+      cardify_bgtrailer_enable: { ru: 'Трейлер в фоне', en: 'Backdrop trailer' },
+      cardify_bgtrailer_sound: { ru: 'Трейлер со звуком', en: 'Trailer with sound' },
+      cardify_bgtrailer_press_any: { ru: 'Нажмите любую кнопку для звука', en: 'Press any key for sound' }
     });
   } catch (e) {}
 
@@ -32,11 +29,7 @@
     if (Lampa.SettingsApi) {
       var icon = "<svg width=\"36\" height=\"28\" viewBox=\"0 0 36 28\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><rect x=\"1.5\" y=\"1.5\" width=\"33\" height=\"25\" rx=\"3.5\" stroke=\"white\" stroke-width=\"3\"/><rect x=\"5\" y=\"14\" width=\"17\" height=\"4\" rx=\"2\" fill=\"white\"/><rect x=\"5\" y=\"20\" width=\"10\" height=\"3\" rx=\"1.5\" fill=\"white\"/><rect x=\"25\" y=\"20\" width=\"6\" height=\"3\" rx=\"1.5\" fill=\"white\"/></svg>";
 
-      Lampa.SettingsApi.addComponent({
-        component: 'cardify_bgtrailer',
-        icon: icon,
-        name: 'Backdrop Trailer'
-      });
+      Lampa.SettingsApi.addComponent({ component: 'cardify_bgtrailer', icon: icon, name: 'Backdrop Trailer' });
 
       Lampa.SettingsApi.addParam({
         component: 'cardify_bgtrailer',
@@ -52,25 +45,26 @@
     }
   } catch (e) {}
 
-  // ---------- CSS ----------
+  // ---------- CSS (ВАЖНО: слой фиксированный, UI не трогаем) ----------
   var css = [
     "<style>",
-    ".cardify-bgtrailer{position:absolute;inset:0;overflow:hidden;opacity:0;transition:opacity .45s ease;pointer-events:none;}",
-    ".cardify-bgtrailer.show{opacity:1;}",
-    ".cardify-bgtrailer .cardify-bgtrailer__host{position:absolute;inset:0;}",
-    // Cover-crop для iframe (16:9) без object-fit
+    ".cardify-bgtrailer{position:fixed;inset:-12% 0;overflow:hidden;pointer-events:none;opacity:0;transition:opacity .45s ease;z-index:1;}",
+    "body.bgtrailer-on .cardify-bgtrailer{opacity:1;}",
+    ".cardify-bgtrailer__host{position:absolute;inset:0;}",
     ".cardify-bgtrailer iframe{position:absolute;top:50%;left:50%;width:160vw;height:90vw;min-width:100%;min-height:100%;transform:translate(-50%,-50%);border:0;}",
-    ".cardify-bgtrailer__shade{position:absolute;inset:0;background:linear-gradient(90deg, rgba(0,0,0,.55) 0%, rgba(0,0,0,.25) 45%, rgba(0,0,0,.55) 100%);}",
-    ".cardify-bgtrailer__vignette{position:absolute;inset:0;background:radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 0%, rgba(0,0,0,.35) 75%, rgba(0,0,0,.6) 100%);}",
-    ".cardify-bgtrailer__hint{position:absolute;right:1.2em;bottom:1.2em;display:flex;align-items:center;gap:.7em;padding:.65em 1em;border-radius:1.6em;background:rgba(0,0,0,.45);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);opacity:0;transform:translate3d(0,10px,0);transition:all .3s ease;}",
+    ".cardify-bgtrailer__shade{position:absolute;inset:0;background:linear-gradient(90deg, rgba(0,0,0,.62) 0%, rgba(0,0,0,.25) 45%, rgba(0,0,0,.62) 100%);}",
+    ".cardify-bgtrailer__vignette{position:absolute;inset:0;background:radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 0%, rgba(0,0,0,.35) 75%, rgba(0,0,0,.62) 100%);}",
+    ".cardify-bgtrailer__hint{position:fixed;right:1.2em;bottom:1.2em;display:flex;align-items:center;gap:.7em;padding:.65em 1em;border-radius:1.6em;background:rgba(0,0,0,.45);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);opacity:0;transform:translate3d(0,10px,0);transition:all .3s ease;z-index:3;}",
     ".cardify-bgtrailer__hint.show{opacity:1;transform:translate3d(0,0,0);}",
     ".cardify-bgtrailer__hint svg{width:1.6em;height:1.6em;opacity:.9;}",
     ".cardify-bgtrailer__hint span{font-size:1.1em;opacity:.95;}",
-    // На всякий случай делаем фон контейнером
-    ".full-start__background{overflow:hidden;}",
+
+    // Когда видео реально пошло — прячем статический фон (но НЕ двигаем раскладку)
+    "body.bgtrailer-on .full-start__background{opacity:0 !important;}",
+    // Контент выше видео
+    "body.bgtrailer-on .full-start, body.bgtrailer-on .full-start-new{position:relative;z-index:2;}",
     "</style>"
   ].join("\n");
-
   try { $('body').append(css); } catch (e) {}
 
   // ---------- YouTube API loader ----------
@@ -78,38 +72,31 @@
   var ytLoading = false;
 
   function ensureYT(cb) {
-    try {
-      if (window.YT && YT.Player) return cb();
+    if (window.YT && YT.Player) return cb();
+    ytWaiters.push(cb);
+    if (ytLoading) return;
+    ytLoading = true;
 
-      ytWaiters.push(cb);
-      if (ytLoading) return;
-      ytLoading = true;
+    var tag = document.createElement('script');
+    tag.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(tag);
 
-      // YouTube Iframe API
-      var tag = document.createElement('script');
-      tag.src = 'https://www.youtube.com/iframe_api';
-      document.head.appendChild(tag);
-
-      var prev = window.onYouTubeIframeAPIReady;
-      window.onYouTubeIframeAPIReady = function () {
-        try { if (typeof prev === 'function') prev(); } catch (e) {}
-        var list = ytWaiters.slice(0);
-        ytWaiters = [];
-        for (var i = 0; i < list.length; i++) {
-          try { list[i](); } catch (e) {}
-        }
-      };
-    } catch (e) {}
+    var prev = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = function () {
+      try { if (typeof prev === 'function') prev(); } catch (e) {}
+      var list = ytWaiters.slice(0);
+      ytWaiters = [];
+      for (var i = 0; i < list.length; i++) { try { list[i](); } catch (e) {} }
+    };
   }
 
-  // ---------- Trailer picker (TMDB videos) ----------
+  // ---------- Trailer picker ----------
   function pickTrailer(data) {
     if (!data || !data.videos || !data.videos.results || !data.videos.results.length) return null;
 
     var items = [];
     data.videos.results.forEach(function (el) {
       if (!el || !el.key) return;
-      // Чаще всего трейлеры с YouTube
       items.push({
         title: (el.name || '').slice(0, 80),
         id: el.key,
@@ -136,7 +123,7 @@
     return pool[0];
   }
 
-  // ---------- Backdrop Trailer Class ----------
+  // ---------- Backdrop Trailer (фикс-слой) ----------
   function BackdropTrailer(fullObject, trailer) {
     var self = this;
 
@@ -144,53 +131,46 @@
     this.activity = fullObject.activity;
     this.trailer = trailer;
 
-    this.started = false;
     this.destroyed = false;
+    this.started = false;
 
-    this.bg = this.activity.render().find('.full-start__background');
-    if (!this.bg || !this.bg.length) return;
-
-    // Mark, чтобы не создавать дважды
-    this.activity.bg_trailer_ready = true;
+    this.autoSound = !!safeField(SETTINGS_SOUND, true);
+    this.showEnabled = !!safeField(SETTINGS_SHOW, true);
 
     this.wrap = $([
       '<div class="cardify-bgtrailer">',
         '<div class="cardify-bgtrailer__host"></div>',
         '<div class="cardify-bgtrailer__shade"></div>',
         '<div class="cardify-bgtrailer__vignette"></div>',
-        '<div class="cardify-bgtrailer__hint">',
-          '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">',
-            '<path d="M3 10V14H7L12 18V6L7 10H3Z" fill="white" fill-opacity="0.9"/>',
-            '<path d="M16.5 8.5C17.7 9.7 18.4 11.3 18.4 13C18.4 14.7 17.7 16.3 16.5 17.5" stroke="white" stroke-opacity="0.75" stroke-width="2" stroke-linecap="round"/>',
-          '</svg>',
-          '<span>' + (Lampa.Lang ? Lampa.Lang.translate('cardify_bgtrailer_press_any') : 'Press any key for sound') + '</span>',
-        '</div>',
+      '</div>'
+    ].join(''));
+
+    this.hint = $([
+      '<div class="cardify-bgtrailer__hint">',
+        '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">',
+          '<path d="M3 10V14H7L12 18V6L7 10H3Z" fill="white" fill-opacity="0.9"/>',
+          '<path d="M16.5 8.5C17.7 9.7 18.4 11.3 18.4 13C18.4 14.7 17.7 16.3 16.5 17.5" stroke="white" stroke-opacity="0.75" stroke-width="2" stroke-linecap="round"/>',
+        '</svg>',
+        '<span>' + (Lampa.Lang ? Lampa.Lang.translate('cardify_bgtrailer_press_any') : 'Press any key for sound') + '</span>',
       '</div>'
     ].join(''));
 
     this.host = this.wrap.find('.cardify-bgtrailer__host');
-    this.hint = this.wrap.find('.cardify-bgtrailer__hint');
 
-    // Вклеиваем в фон
-    this.bg.append(this.wrap);
+    // Вклеиваем в body (НЕ в background!)
+    $('body').append(this.wrap).append(this.hint);
 
-    this.autoSound = !!safeField(SETTINGS_SOUND, true);
-    this.showEnabled = !!safeField(SETTINGS_SHOW, true);
-
+    // События жизненного цикла
     this.onActivity = function (e) {
       if (!e || e.type !== 'destroy') return;
       if (e.object && e.object.activity === self.activity) self.destroy();
     };
-
     this.onToggle = function () {
       if (self.destroyed) return;
-      // Если мы не на странице full_start — пауза
       if (!self.isOnThisFullStart()) self.pause(true);
       else self.play();
     };
-
     this.onAnyKeyDown = function () {
-      // Пытаемся включить звук при любом нажатии
       self.tryUnmute(true);
       self.detachAnyKey();
     };
@@ -206,24 +186,19 @@
 
   BackdropTrailer.prototype.isOnThisFullStart = function () {
     try {
-      return Lampa.Activity.active().activity === this.activity
-        && Lampa.Controller.enabled().name === 'full_start';
-    } catch (e) {
-      return false;
-    }
+      return Lampa.Activity.active().activity === this.activity &&
+        Lampa.Controller.enabled().name === 'full_start';
+    } catch (e) { return false; }
   };
 
   BackdropTrailer.prototype.createPlayer = function () {
     var self = this;
+    if (!window.YT || !YT.Player) return this.destroy();
 
-    if (!window.YT || !YT.Player) return this.fail();
-
-    // Стартуем muted для надёжного autoplay, потом пробуем unmute
+    // autoplay надёжнее со startMuted, потом пытаемся снять mute
     var startMuted = true;
 
     this.player = new YT.Player(this.host[0], {
-      width: 1920,
-      height: 1080,
       videoId: this.trailer.id,
       playerVars: {
         controls: 0,
@@ -243,30 +218,30 @@
       },
       events: {
         onReady: function () {
-          // небольшая задержка, чтобы UI успел отрисоваться
           setTimeout(function () {
             if (self.destroyed) return;
             if (!self.showEnabled) return;
             if (!self.isOnThisFullStart()) return;
             self.play();
-          }, 900);
+          }, 600);
         },
         onStateChange: function (st) {
           if (self.destroyed) return;
 
           if (st.data === YT.PlayerState.PLAYING) {
             self.started = true;
-            self.wrap.addClass('show');
 
-            // Автозвук: либо уже разрешали ранее, либо включено в настройках
+            // ВАЖНО: только когда реально PLAYING — включаем режим “видео вместо статики”
+            document.body.classList.add('bgtrailer-on');
+
+            // Звук
             if (self.autoSound) {
-              // если уже разрешали — стараемся сразу
               var already = !!safeField(SETTINGS_UNMUTED_ONCE, false);
               self.tryUnmute(already);
-              // если всё ещё muted — покажем подсказку и повесим “любой клик/кнопка”
+
+              // Если всё ещё muted — покажем подсказку и ждём кнопку
               setTimeout(function () {
-                if (self.destroyed) return;
-                if (!self.player) return;
+                if (self.destroyed || !self.player) return;
                 try {
                   if (self.player.isMuted && self.player.isMuted()) {
                     self.hint.addClass('show');
@@ -276,7 +251,7 @@
                     self.detachAnyKey();
                   }
                 } catch (e) {}
-              }, 600);
+              }, 500);
             }
           }
 
@@ -285,48 +260,38 @@
           }
 
           if (st.data === YT.PlayerState.ENDED) {
-            // на всякий случай (loop обычно хватает)
             try { self.player.seekTo(0, true); self.player.playVideo(); } catch (e) {}
           }
         },
         onError: function () {
-          self.fail();
+          self.destroy();
         }
       }
     });
   };
 
   BackdropTrailer.prototype.attachAnyKey = function () {
-    try {
-      if (this._anyKeyAttached) return;
-      this._anyKeyAttached = true;
-      document.addEventListener('keydown', this.onAnyKeyDown, true);
-    } catch (e) {}
+    if (this._anyKeyAttached) return;
+    this._anyKeyAttached = true;
+    document.addEventListener('keydown', this.onAnyKeyDown, true);
   };
 
   BackdropTrailer.prototype.detachAnyKey = function () {
-    try {
-      if (!this._anyKeyAttached) return;
-      this._anyKeyAttached = false;
-      document.removeEventListener('keydown', this.onAnyKeyDown, true);
-    } catch (e) {}
+    if (!this._anyKeyAttached) return;
+    this._anyKeyAttached = false;
+    document.removeEventListener('keydown', this.onAnyKeyDown, true);
   };
 
   BackdropTrailer.prototype.tryUnmute = function (aggressive) {
-    if (!this.player) return;
-    if (!this.autoSound) return;
-
+    if (!this.player || !this.autoSound) return;
     try {
-      // aggressive=true — прям сильно пытаемся включить звук
       if (this.player.unMute) this.player.unMute();
       if (this.player.setVolume) this.player.setVolume(100);
 
-      // Если получилось — запомним
       if (this.player.isMuted && !this.player.isMuted()) {
         try { Lampa.Storage.set(SETTINGS_UNMUTED_ONCE, true); } catch (e) {}
         this.hint.removeClass('show');
       } else {
-        // если не получилось и aggressive — оставим подсказку
         if (aggressive) this.hint.addClass('show');
       }
     } catch (e) {}
@@ -334,28 +299,21 @@
 
   BackdropTrailer.prototype.play = function () {
     if (!this.player || this.destroyed || !this.showEnabled) return;
-    try {
-      this.player.playVideo();
-      // если уже запускали и вернулись на страницу — покажем снова
-      if (this.started) this.wrap.addClass('show');
-    } catch (e) {}
+    if (!this.isOnThisFullStart()) return;
+    try { this.player.playVideo(); } catch (e) {}
   };
 
   BackdropTrailer.prototype.pause = function (hide) {
     if (!this.player || this.destroyed) return;
     try { this.player.pauseVideo(); } catch (e) {}
-    if (hide) this.wrap.removeClass('show');
-  };
-
-  BackdropTrailer.prototype.fail = function () {
-    // если YouTube не отдал/ошибка — просто убираем слой, оставляем обычный backdrop
-    this.destroy();
+    if (hide) document.body.classList.remove('bgtrailer-on');
   };
 
   BackdropTrailer.prototype.destroy = function () {
     if (this.destroyed) return;
     this.destroyed = true;
 
+    document.body.classList.remove('bgtrailer-on');
     try { this.detachAnyKey(); } catch (e) {}
 
     try { Lampa.Listener.remove('activity', this.onActivity); } catch (e) {}
@@ -364,38 +322,29 @@
     try { if (this.player && this.player.destroy) this.player.destroy(); } catch (e) {}
 
     try { this.wrap.remove(); } catch (e) {}
+    try { this.hint.remove(); } catch (e) {}
 
     try { this.activity.bg_trailer_ready = false; } catch (e) {}
   };
 
-  function safeField(key, def) {
-    try {
-      var v = Lampa.Storage.field(key);
-      if (typeof v === 'undefined') return def;
-      return v;
-    } catch (e) {
-      return def;
-    }
-  }
-
-  // ---------- Hook: запускаем на карточке фильма ----------
+  // ---------- Hook ----------
   Lampa.Listener.follow('full', function (e) {
     try {
-      // В разных сборках встречается "complite"/"complete"
       var ok = e && (e.type === 'complite' || e.type === 'complete');
       if (!ok) return;
 
       if (!safeField(SETTINGS_SHOW, true)) return;
 
+      // Только на активной карточке
+      if (Lampa.Activity.active().activity !== e.object.activity) return;
+
+      // Дубль-защита
+      if (e.object.activity.bg_trailer_ready) return;
+
       var trailer = pickTrailer(e.data);
       if (!trailer) return;
 
-      // Создаём только для активной карточки
-      if (Lampa.Activity.active().activity !== e.object.activity) return;
-
-      // Защита от дубля
-      if (e.object.activity.bg_trailer_ready) return;
-
+      e.object.activity.bg_trailer_ready = true;
       new BackdropTrailer(e.object, trailer);
     } catch (err) {}
   });
