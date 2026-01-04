@@ -2,24 +2,23 @@
   'use strict';
 
   // ==========================================================
-  // Shikimori Fan Hub (Lampac-only TMDB)
-  // - TMDB работает ТОЛЬКО через Lampac:  /tmdb/api/3/...
-  // - Если Lampac (или его TMDB proxy) недоступен -> ошибка и выход
-  // - Shikimori: каталог / поиск / календарь / мои списки (через token)
+  // Shikimori Fan Hub (TMDB ONLY via Lampa.TMDB.api proxy)
+  // Требование: TMDB proxy (Lampac/прокси) включён в системе.
+  // Если TMDB идёт напрямую на api.themoviedb.org -> ошибка и выход.
   // ==========================================================
 
-  if (window.plugin_shikifan_hub_lampac_ready) return;
-  window.plugin_shikifan_hub_lampac_ready = true;
+  if (window.plugin_shikifan_hub_proxy_ready) return;
+  window.plugin_shikifan_hub_proxy_ready = true;
 
-  var PLUGIN_NAME = 'Shikimori Fan Hub (Lampac)';
-  var COMPONENT_HUB = 'ShikiFanHubLampac';
-  var COMPONENT_ANIME = 'ShikiAnimeLampac';
+  var PLUGIN_NAME = 'Shikimori Fan Hub (Proxy TMDB)';
+  var COMPONENT_HUB = 'ShikiFanHubProxy';
+  var COMPONENT_ANIME = 'ShikiAnimeProxy';
 
   var SHIKI_ORIGIN = 'https://shikimori.one';
   var SHIKI_API_V1 = SHIKI_ORIGIN + '/api';
   var SHIKI_API_V2 = SHIKI_ORIGIN + '/api/v2';
 
-  // MAL/IMDb bridge (опционально, только для повышения точности TMDB)
+  // Опционально для повышения точности: MAL -> IMDb -> TMDB /find
   var ARM_IDS = 'https://arm.haglund.dev/api/v2/ids';
 
   // Storage keys
@@ -27,7 +26,7 @@
   var SKEY_CENSORED = 'shikifan.censored';
 
   // -------------------------
-  // Small helpers
+  // Helpers
   // -------------------------
   function sget(key, def) {
     try {
@@ -81,10 +80,7 @@
     return '';
   }
 
-  function buildUrl(base, path, params) {
-    var url = base + path;
-    if (!params) return url;
-
+  function buildQuery(params) {
     var q = [];
     for (var k in params) {
       if (!params.hasOwnProperty(k)) continue;
@@ -92,8 +88,11 @@
       if (v === undefined || v === null || v === '') continue;
       q.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(v)));
     }
-    if (q.length) url += (url.indexOf('?') >= 0 ? '&' : '?') + q.join('&');
-    return url;
+    return q.length ? ('?' + q.join('&')) : '';
+  }
+
+  function buildUrl(base, path, params) {
+    return base + path + (params ? buildQuery(params) : '');
   }
 
   function askText(title, value) {
@@ -153,7 +152,7 @@
   var limiter = new RateLimiter(700);
 
   // -------------------------
-  // Cache (Storage) - простой TTL
+  // Cache (Storage) - TTL
   // -------------------------
   function cacheKey(url) { return 'shikifan.cache.' + (Lampa.Utils ? Lampa.Utils.hash(url) : url); }
 
@@ -202,71 +201,59 @@
   }
 
   // ==========================================================
-  // Lampac-only TMDB proxy
+  // TMDB via Lampa.TMDB.api ONLY (Proxy required)
   // ==========================================================
-  function detectLampacOrigin() {
-    try {
-      if (document.currentScript && document.currentScript.src) {
-        return new URL(document.currentScript.src).origin;
-      }
-    } catch (e) {}
-
-    try {
-      var scripts = Array.from(document.querySelectorAll('script[src]'));
-      var guess = scripts.map(function (s) { return s.src; }).reverse()
-        .find(function (u) { return /:\d{2,5}\//.test(u); });
-      if (guess) return new URL(guess).origin;
-    } catch (e2) {}
-
-    return null;
+  function tmdbApiUrl(pathWithQuery) {
+    if (!Lampa.TMDB || typeof Lampa.TMDB.api !== 'function') return '';
+    return Lampa.TMDB.api(pathWithQuery);
   }
 
-  var LAMPAC_ORIGIN = detectLampacOrigin();
-  var LAMPAC_TMDB_BASE = LAMPAC_ORIGIN ? (LAMPAC_ORIGIN + '/tmdb/api/3/') : null;
+  function isTmdbProxyActive() {
+    try {
+      var u = tmdbApiUrl('configuration');
+      if (!u) return false;
+      // Если это прямой TMDB — запрещаем
+      return u.indexOf('api.themoviedb.org/3/') === -1;
+    } catch (e) {
+      return false;
+    }
+  }
 
-  function lampacTmdbFail(hint, jqXHR) {
-    var code = (jqXHR && jqXHR.status) ? jqXHR.status : 0;
+  var __tmdb_proxy_ok = false;
 
-    var msg = 'Нужен Lampac: TMDB proxy недоступен.';
-    if (!LAMPAC_TMDB_BASE) {
-      msg = 'Нужен Lampac: не удалось определить адрес Lampac. Плагин должен загружаться с домена Lampac.';
-    } else if (code === 404) {
-      msg = 'Нужен Lampac: не найден маршрут /tmdb/api/3 (проверь версию/настройки Lampac).';
-    } else if (code === 401) {
-      msg = 'Lampac TMDB proxy ответил 401: на Lampac не задан tmdb.api_key или он неверный.';
-    } else if (code === 0) {
-      msg = 'Нужен Lampac: нет соединения с Lampac (домен/порт/доступ).';
+  function ensureTmdbProxyReady() {
+    if (__tmdb_proxy_ok) return Promise.resolve(true);
+
+    if (!Lampa.TMDB || typeof Lampa.TMDB.api !== 'function') {
+      notify('TMDB: не найден Lampa.TMDB.api(). Нужен Lampac/прокси TMDB.');
+      return Promise.reject('NO_LAMPA_TMDB_API');
     }
 
-    console.error('[ShikiFanHubLampac]', hint, jqXHR);
-    notify(msg);
-    throw new Error(msg);
-  }
+    if (!isTmdbProxyActive()) {
+      notify('TMDB: прокси не активен. Включи proxy_tmdb / Lampac TMDB proxy (иначе плагин не работает).');
+      return Promise.reject('PROXY_DISABLED');
+    }
 
-  var __lampac_tmdb_ok = false;
-
-  function ensureLampacTmdbReady() {
-    if (__lampac_tmdb_ok) return Promise.resolve(true);
-    if (!LAMPAC_TMDB_BASE) return Promise.reject(lampacTmdbFail('Lampac origin not detected'));
-
-    // проверка прокси: configuration
-    return ajaxJSON({
-      url: LAMPAC_TMDB_BASE + 'configuration?language=' + encodeURIComponent(safeLang()),
-      method: 'GET'
-    }).then(function () {
-      __lampac_tmdb_ok = true;
-      return true;
-    }).catch(function (e) {
-      lampacTmdbFail('TMDB proxy preflight failed', e);
-    });
-  }
-
-  function lampacTmdbGet(path, params) {
-    return ensureLampacTmdbReady().then(function () {
-      var url = buildUrl(LAMPAC_TMDB_BASE, path, params || {});
-      return ajaxJSON({ url: url, method: 'GET' }).catch(function (e) {
-        lampacTmdbFail('TMDB GET failed: ' + path, e);
+    // preflight
+    var test = tmdbApiUrl('configuration' + buildQuery({ language: safeLang() }));
+    return ajaxJSON({ url: test, method: 'GET' })
+      .then(function () {
+        __tmdb_proxy_ok = true;
+        return true;
+      })
+      .catch(function (e) {
+        var code = e && e.status ? e.status : 0;
+        if (code === 401) notify('TMDB proxy: 401 (на прокси/лампак не настроен tmdb api key).');
+        else if (code === 404) notify('TMDB proxy: 404 (не найден роут /tmdb/api/3 или аналог).');
+        else notify('TMDB proxy: ошибка соединения.');
+        return Promise.reject('PROXY_PRECHECK_FAIL');
       });
+  }
+
+  function tmdbGet(path, params) {
+    return ensureTmdbProxyReady().then(function () {
+      var url = tmdbApiUrl(path + buildQuery(params || {}));
+      return ajaxJSON({ url: url, method: 'GET' });
     });
   }
 
@@ -382,7 +369,7 @@
   }
 
   // ==========================================================
-  // TMDB open in Lampa (Lampac-only)
+  // TMDB open in Lampa
   // ==========================================================
   function pickTmdbFromFind(findRes, kind) {
     if (!findRes) return null;
@@ -401,8 +388,7 @@
   }
 
   function openInLampaByAnime(animeId) {
-    // Жёстко: если Lampac/TMDB proxy не готов -> сразу ошибка
-    return ensureLampacTmdbReady().then(function () {
+    return ensureTmdbProxyReady().then(function () {
       return shikiGetV1('/animes/' + animeId, null, 10 * 60 * 1000);
     }).then(function (anime) {
       var kind = anime.kind || 'tv';
@@ -410,26 +396,28 @@
       var year = (anime.aired_on && String(anime.aired_on).slice(0, 4)) || '';
       var mal = anime.myanimelist_id || null;
 
-      // 1) Пытаемся точнее: MAL -> IMDb -> TMDB find
+      // 1) MAL -> IMDb -> TMDB find
       if (mal) {
         return armIdsByMal(mal).then(function (ids) {
           if (ids && ids.imdb) {
-            return lampacTmdbGet('find/' + ids.imdb, { external_source: 'imdb_id', language: safeLang() })
-              .then(function (findRes) {
-                var picked = pickTmdbFromFind(findRes, kind);
-                if (picked) return picked;
-                throw new Error('TMDB_FIND_EMPTY');
-              });
+            return tmdbGet('find/' + ids.imdb, {
+              external_source: 'imdb_id',
+              language: safeLang()
+            }).then(function (findRes) {
+              var picked = pickTmdbFromFind(findRes, kind);
+              if (picked) return picked;
+              throw new Error('TMDB_FIND_EMPTY');
+            });
           }
           throw new Error('NO_IMDB');
         }).catch(function () {
-          // 2) fallback: поиск по названию
+          // 2) fallback: search
           var path = (kind === 'movie') ? 'search/movie' : 'search/tv';
           var p = { query: title, language: safeLang() };
           if (kind === 'movie' && year) p.year = year;
           if (kind !== 'movie' && year) p.first_air_date_year = year;
 
-          return lampacTmdbGet(path, p).then(function (sr) {
+          return tmdbGet(path, p).then(function (sr) {
             if (!sr || !sr.results || !sr.results.length) throw new Error('TMDB_SEARCH_EMPTY');
             return {
               id: sr.results[0].id,
@@ -440,9 +428,9 @@
         });
       }
 
-      // если MAL нет -> сразу search
+      // MAL нет -> search
       var path2 = (kind === 'movie') ? 'search/movie' : 'search/tv';
-      return lampacTmdbGet(path2, { query: title, language: safeLang() }).then(function (sr2) {
+      return tmdbGet(path2, { query: title, language: safeLang() }).then(function (sr2) {
         if (!sr2 || !sr2.results || !sr2.results.length) throw new Error('TMDB_SEARCH_EMPTY');
         return {
           id: sr2.results[0].id,
@@ -459,13 +447,12 @@
         card: picked.card
       });
     }).catch(function (e) {
-      // lampacTmdbFail уже показал Noty, но на всякий:
       if (e && e.message) notify(e.message);
     });
   }
 
   // ==========================================================
-  // Settings (Lampac-only)
+  // Settings
   // ==========================================================
   function clearCache() {
     try {
@@ -480,12 +467,15 @@
     var token = String(sget(SKEY_TOKEN, '') || '').trim();
     var censored = bget(SKEY_CENSORED, true);
 
+    var proxyUrl = tmdbApiUrl('configuration') || '(нет Lampa.TMDB.api)';
+    var proxyMode = isTmdbProxyActive() ? 'proxy' : 'direct';
+
     Lampa.Select.show({
       title: PLUGIN_NAME + ' — Settings',
       items: [
         { title: 'Shikimori token (Bearer)', subtitle: token ? 'задан' : 'не задан', key: 'token' },
         { title: 'Censored', subtitle: censored ? 'true' : 'false', key: 'censored' },
-        { title: 'Проверить Lampac TMDB proxy', subtitle: LAMPAC_TMDB_BASE ? LAMPAC_TMDB_BASE : 'не определён', key: 'lampac' },
+        { title: 'TMDB mode', subtitle: proxyMode + ' • ' + proxyUrl, key: 'check' },
         { title: 'Очистить кэш', subtitle: 'локальный кэш запросов', key: 'clear' }
       ],
       onBack: function () { Lampa.Controller.toggle('content'); },
@@ -497,15 +487,18 @@
             notify('Token сохранён');
           });
         }
+
         if (a.key === 'censored') {
           sset(SKEY_CENSORED, censored ? 'false' : 'true');
           notify('Censored: ' + (censored ? 'false' : 'true'));
         }
-        if (a.key === 'lampac') {
-          ensureLampacTmdbReady()
-            .then(function () { notify('Lampac TMDB proxy: OK'); })
+
+        if (a.key === 'check') {
+          ensureTmdbProxyReady()
+            .then(function () { notify('TMDB proxy: OK'); })
             .catch(function () {});
         }
+
         if (a.key === 'clear') {
           clearCache();
           notify('Кэш очищен');
@@ -515,9 +508,9 @@
   }
 
   // ==========================================================
-  // UI Templates
+  // Templates + styles
   // ==========================================================
-  Lampa.Template.add('ShikiFanHubLampacStyle',
+  Lampa.Template.add('ShikiFanHubProxyStyle',
     "<style>" +
       ".shikifan-head{margin-left:1.5em}" +
       ".shikifan-list.category-full{justify-content:space-between!important}" +
@@ -540,7 +533,7 @@
     "</style>"
   );
 
-  Lampa.Template.add('ShikiFanHubLampacCard',
+  Lampa.Template.add('ShikiFanHubProxyCard',
     "<div class='shikifan-card card selector layer--visible layer--render'>" +
       "<div class='card__view'>" +
         "<img src='{img}' class='card__img' />" +
@@ -553,7 +546,7 @@
     "</div>"
   );
 
-  Lampa.Template.add('ShikiAnimeLampacTpl',
+  Lampa.Template.add('ShikiAnimeProxyTpl',
     "<div class='shikianime'>" +
       "<div class='shikianime__top'>" +
         "<div class='shikianime__poster'><img src='{img}' /></div>" +
@@ -579,7 +572,7 @@
     "</div>"
   );
 
-  $('body').append(Lampa.Template.get('ShikiFanHubLampacStyle', {}, true));
+  $('body').append(Lampa.Template.get('ShikiFanHubProxyStyle', {}, true));
 
   // ==========================================================
   // Card
@@ -587,7 +580,7 @@
   function ShikiCard(anime) {
     var badge = anime.aired_on ? String(anime.aired_on).slice(0, 4) : ' ';
     var badge2 = anime.status || ' ';
-    var item = Lampa.Template.get('ShikiFanHubLampacCard', {
+    var item = Lampa.Template.get('ShikiFanHubProxyCard', {
       img: imgUrlFromV1(anime),
       type: (anime.kind || '').toUpperCase(),
       rate: (anime.score != null) ? anime.score : '0',
@@ -681,7 +674,6 @@
     }
 
     function loadCalendar() {
-      // /api/calendar
       var url = buildUrl(SHIKI_API_V1, '/calendar', { censored: bget(SKEY_CENSORED, true) ? 'true' : 'false' });
       var cached = cacheGet(url);
 
@@ -783,27 +775,32 @@
     }
 
     this.create = function () {
-      attachHead();
-      clearList();
+      // Жёсткое требование: если нет TMDB proxy — дальше не работаем вообще
+      ensureTmdbProxyReady().then(function () {
+        attachHead();
+        clearList();
 
-      scroll.onWheel = function (step) {
-        if (!Lampa.Controller.own(self)) self.start();
-        if (step > 0) Navigator.move('down'); else Navigator.move('up');
-      };
+        scroll.onWheel = function (step) {
+          if (!Lampa.Controller.own(self)) self.start();
+          if (step > 0) Navigator.move('down'); else Navigator.move('up');
+        };
 
-      scroll.append(head);
-      scroll.append(body);
-      html.append(scroll.render(true));
+        scroll.append(head);
+        scroll.append(body);
+        html.append(scroll.render(true));
 
-      self.activity.loader(true);
+        self.activity.loader(true);
 
-      if (state.mode === 'home') { setupPaging(loadHome); loadHome(); }
-      else if (state.mode === 'search') { setupPaging(loadSearch); loadSearch(); }
-      else if (state.mode === 'calendar') { scroll.onEnd = function () {}; loadCalendar(); }
-      else if (state.mode === 'my') { scroll.onEnd = function () {}; loadMy(state.my_status || 'watching'); }
-      else { setupPaging(loadHome); loadHome(); }
+        if (state.mode === 'home') { setupPaging(loadHome); loadHome(); }
+        else if (state.mode === 'search') { setupPaging(loadSearch); loadSearch(); }
+        else if (state.mode === 'calendar') { scroll.onEnd = function () {}; loadCalendar(); }
+        else if (state.mode === 'my') { scroll.onEnd = function () {}; loadMy(state.my_status || 'watching'); }
+        else { setupPaging(loadHome); loadHome(); }
 
-      self.start();
+        self.start();
+      }).catch(function () {
+        self.empty();
+      });
     };
 
     this.empty = function () {
@@ -891,7 +888,6 @@
               return;
             }
 
-            // статус
             upsertUserRate(auth.me.id, anime.id, { status: a.key }, auth.token)
               .then(function () { notify('Статус обновлён'); })
               .catch(function () { notify('Не удалось обновить статус'); });
@@ -915,7 +911,7 @@
       if (anime.fandubbers && anime.fandubbers.length) fan.push("Fandub: <b>" + anime.fandubbers.join(', ') + "</b>");
       if (anime.next_episode_at) fan.push("Next: <b>" + anime.next_episode_at + "</b>");
 
-      var node = $(Lampa.Template.get('ShikiAnimeLampacTpl', {
+      var node = $(Lampa.Template.get('ShikiAnimeProxyTpl', {
         img: imgUrlFromV1(anime),
         title: titleByLang(anime),
         sub: (anime.name || '') + (anime.aired_on ? (' • ' + anime.aired_on) : ''),
@@ -955,9 +951,10 @@
       var animeId = object.anime_id;
       if (!animeId) return self.empty();
 
-      shikiGetV1('/animes/' + animeId, null, 10 * 60 * 1000)
-        .then(build)
-        .catch(function () { self.empty(); });
+      // TMDB proxy требуем глобально; но для страницы аниме тоже проверим
+      ensureTmdbProxyReady().then(function () {
+        return shikiGetV1('/animes/' + animeId, null, 10 * 60 * 1000);
+      }).then(build).catch(function () { self.empty(); });
     };
 
     this.empty = function () {
@@ -996,7 +993,7 @@
   }
 
   // ==========================================================
-  // Menu button + start
+  // Menu + start
   // ==========================================================
   function addMenuButton() {
     var btn = $(
@@ -1011,49 +1008,24 @@
     );
 
     btn.on('hover:enter', function () {
-      // Важно: TMDB будет нужен при "Смотреть (Lampa)". Сам каталог Shikimori может работать и без Lampac.
-      // Но ты просил "Lampac есть иначе ошибка" — значит проверяем Lampac сразу.
-      ensureLampacTmdbReady()
-        .then(function () {
-          Lampa.Activity.push({ url: '', title: 'Shikimori', component: COMPONENT_HUB, page: 1, mode: 'home' });
-        })
-        .catch(function () {});
+      ensureTmdbProxyReady().then(function () {
+        Lampa.Activity.push({ url: '', title: 'Shikimori', component: COMPONENT_HUB, page: 1, mode: 'home' });
+      }).catch(function () {});
     });
 
     $('.menu .menu__list').eq(0).append(btn);
   }
 
   function startPlugin() {
-    var manifest = {
-      type: 'other',
-      version: '1.0.0',
-      name: PLUGIN_NAME,
-      description: 'Shikimori hub with Lampac-only TMDB',
-      component: COMPONENT_HUB
-    };
-
-    // регистрируем компоненты
     Lampa.Component.add(COMPONENT_HUB, ShikiFanHub);
     Lampa.Component.add(COMPONENT_ANIME, ShikiAnime);
 
-    // стиль
-    $('body').append(Lampa.Template.get('ShikiFanHubLampacStyle', {}, true));
-
-    // кнопка меню
     if (window.appready) addMenuButton();
     else {
       Lampa.Listener.follow('app', function (e) {
         if (e.type === 'ready') addMenuButton();
       });
     }
-
-    // в манифест (у разных сборок может быть массив/объект)
-    try {
-      if (Lampa.Manifest) {
-        if (Array.isArray(Lampa.Manifest.plugins)) Lampa.Manifest.plugins.push(manifest);
-        else Lampa.Manifest.plugins = manifest;
-      }
-    } catch (e) {}
   }
 
   startPlugin();
