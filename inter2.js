@@ -30,11 +30,7 @@
     if (Lampa.SettingsApi) {
       var icon = "<svg width=\"36\" height=\"28\" viewBox=\"0 0 36 28\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><rect x=\"1.5\" y=\"1.5\" width=\"33\" height=\"25\" rx=\"3.5\" stroke=\"white\" stroke-width=\"3\"/><rect x=\"5\" y=\"14\" width=\"17\" height=\"4\" rx=\"2\" fill=\"white\"/><rect x=\"5\" y=\"20\" width=\"10\" height=\"3\" rx=\"1.5\" fill=\"white\"/><rect x=\"25\" y=\"20\" width=\"6\" height=\"3\" rx=\"1.5\" fill=\"white\"/></svg>";
 
-      Lampa.SettingsApi.addComponent({
-        component: 'cardify_bgtrailer',
-        icon: icon,
-        name: 'Backdrop Trailer'
-      });
+      Lampa.SettingsApi.addComponent({ component: 'cardify_bgtrailer', icon: icon, name: 'Backdrop Trailer' });
 
       Lampa.SettingsApi.addParam({
         component: 'cardify_bgtrailer',
@@ -50,7 +46,7 @@
     }
   } catch (e) {}
 
-  // ----------------- CSS (minimalistic + universal hide class) -----------------
+  // ----------------- CSS -----------------
   var css = [
     "<style>",
     ".cardify-bgtrailer{position:fixed;inset:-12% 0;overflow:hidden;pointer-events:none;opacity:0;transition:opacity .45s ease;z-index:1;}",
@@ -58,9 +54,9 @@
     ".cardify-bgtrailer__host{position:absolute;inset:0;}",
     ".cardify-bgtrailer iframe{position:absolute;top:50%;left:50%;width:160vw;height:90vw;min-width:100%;min-height:100%;transform:translate(-50%,-50%);border:0;}",
 
-    /* мягкое затемнение */
-    ".cardify-bgtrailer__shade{position:absolute;inset:0;background:linear-gradient(90deg, rgba(0,0,0,.32) 0%, rgba(0,0,0,.10) 55%, rgba(0,0,0,.22) 100%);}",
-    ".cardify-bgtrailer__vignette{position:absolute;inset:0;background:radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 0%, rgba(0,0,0,.10) 72%, rgba(0,0,0,.18) 100%);}",
+    /* минималистичное затемнение */
+    ".cardify-bgtrailer__shade{position:absolute;inset:0;background:linear-gradient(90deg, rgba(0,0,0,.28) 0%, rgba(0,0,0,.08) 55%, rgba(0,0,0,.18) 100%);}",
+    ".cardify-bgtrailer__vignette{position:absolute;inset:0;background:radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 0%, rgba(0,0,0,.08) 72%, rgba(0,0,0,.14) 100%);}",
 
     ".cardify-bgtrailer__hint{position:fixed;right:1.2em;bottom:1.2em;display:flex;align-items:center;gap:.7em;",
     "padding:.55em .95em;border-radius:1.6em;background:rgba(0,0,0,.25);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);",
@@ -69,13 +65,12 @@
     ".cardify-bgtrailer__hint svg{width:1.5em;height:1.5em;opacity:.9;}",
     ".cardify-bgtrailer__hint span{font-size:1.05em;opacity:.95;}",
 
-    /* прячем статичный backdrop когда видео реально играет */
+    /* прячем статичный backdrop только когда видео реально играет */
     "body.bgtrailer-on .full-start__background{opacity:0 !important;}",
     "body.bgtrailer-on .full-start, body.bgtrailer-on .full-start-new{position:relative;z-index:2;}",
 
-    /* универсальный класс скрытия (мы будем навешивать его из JS на нужные DOM-узлы) */
+    /* класс для скрытия “нижнего” контента */
     ".bgtrailer-minhide{opacity:0 !important;max-height:0 !important;overflow:hidden !important;margin:0 !important;padding:0 !important;pointer-events:none !important;transition:all .25s ease !important;}",
-
     "</style>"
   ].join("\n");
   try { $('body').append(css); } catch (e) {}
@@ -113,13 +108,11 @@
       items.push({
         id: el.key,
         code: el.iso_639_1 || '',
-        time: el.published_at ? new Date(el.published_at).getTime() : 0,
-        name: el.name || ''
+        time: el.published_at ? new Date(el.published_at).getTime() : 0
       });
     });
 
     if (!items.length) return null;
-
     items.sort(function (a, b) { return a.time > b.time ? -1 : a.time < b.time ? 1 : 0; });
 
     var lang = '';
@@ -136,99 +129,99 @@
     return pool[0] || null;
   }
 
-  // ----------------- Minimal UI logic (DOM-based, no guessing classes) -----------------
-  function normalizeText(t) {
+  // ----------------- Minimalism: Cardify-like (keep top, hide only "Подробно" block) -----------------
+  function norm(t) {
     return (t || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  function isAfter(anchorEl, nodeEl) {
+    try {
+      return !!(anchorEl.compareDocumentPosition(nodeEl) & Node.DOCUMENT_POSITION_FOLLOWING);
+    } catch (e) { return true; }
   }
 
   function applyMinimal(activityRender, enable) {
     if (!activityRender || !activityRender.length) return;
 
-    var body = activityRender.find('.activity__body');
-    if (!body.length) body = activityRender; // fallback
+    var root = activityRender.find('.full-start-new, .full-start').first();
+    if (!root.length) root = activityRender;
 
-    // Если выключаем — возвращаем всё
+    // Снять минимализм
     if (!enable) {
-      body.find('[data-bgtrailer-min="1"]').each(function () {
-        var $el = $(this);
-        $el.removeAttr('data-bgtrailer-min').removeClass('bgtrailer-minhide');
+      root.find('[data-bgmin="1"]').each(function () {
+        $(this).removeAttr('data-bgmin').removeClass('bgtrailer-minhide');
       });
       return;
     }
 
-    // 1) Быстрые попытки по типичным контейнерам (если есть)
-    var quickSelectors = [
-      '.full-start__body-bottom', '.full-start-new__body-bottom',
-      '.full-start__descr', '.full-start__description', '.full-start__text',
-      '.full-start__about', '.full-start__more',
-      '.full-start-new__descr', '.full-start-new__description', '.full-start-new__text',
-      '.full-start-new__about', '.full-start-new__more'
-    ];
+    // 1) Находим “якорь” верхнего UI (кнопки/панель)
+    var btnWrap = root.find('.full-start__buttons, .full-start-new__buttons, .buttons--container').first();
+    if (!btnWrap.length) btnWrap = root.find('.full-start__button, .button--play, .view--trailer').first();
+    var anchor = btnWrap.length ? btnWrap[0] : null;
 
-    var anyQuick = false;
-    quickSelectors.forEach(function (sel) {
-      var nodes = body.find(sel);
-      if (nodes.length) {
-        anyQuick = true;
-        nodes.each(function () {
-          $(this).attr('data-bgtrailer-min', '1').addClass('bgtrailer-minhide');
-        });
-      }
-    });
-
-    // 2) Главный универсальный метод: найти блок с заголовком "Подробно" и скрыть его и всё ниже
-    // (работает даже если классы совершенно другие)
-    var needles = [
-      'подробно', 'подробнее',
-      'details', 'more', 'about'
-    ];
-
+    // 2) Ищем маркер “Подробно/Подробнее/Details…” ПОСЛЕ кнопок
+    var needles = ['подробно', 'подробнее', 'details', 'more', 'about'];
     var marker = null;
 
-    // ищем элементы-заголовки (div/span/h2/h3 и т.п.), не огромный DOM
-    body.find('h1,h2,h3,h4,div,span,p').each(function () {
+    root.find('h1,h2,h3,h4,div,span,p').each(function () {
       if (marker) return;
-      var txt = normalizeText(this.textContent);
+      var txt = norm(this.textContent);
       if (!txt) return;
-      // строгое совпадение или начинается
+
+      var ok = false;
       for (var i = 0; i < needles.length; i++) {
-        if (txt === needles[i] || txt.indexOf(needles[i]) === 0) {
-          marker = $(this);
-          return;
-        }
+        if (txt === needles[i] || txt.indexOf(needles[i]) === 0) { ok = true; break; }
       }
+      if (!ok) return;
+
+      // если есть якорь — берём только то, что ниже кнопок
+      if (anchor && !isAfter(anchor, this)) return;
+
+      marker = $(this);
     });
 
-    if (marker && marker.length) {
-      // поднимаемся до прямого ребёнка body, чтобы скрыть “секцию” целиком
-      var section = marker;
-      while (section.length && section.parent().length && section.parent()[0] !== body[0]) {
-        section = section.parent();
-      }
+    if (!marker || !marker.length) return;
 
-      // скрываем саму секцию и все последующие блоки
-      section.add(section.nextAll()).each(function () {
-        $(this).attr('data-bgtrailer-min', '1').addClass('bgtrailer-minhide');
-      });
+    var titleSel = '.full-start__title, .full-start-new__title';
+    var buttonsSel = '.full-start__buttons, .full-start-new__buttons, .buttons--container, .full-start__button, .button--play, .view--trailer';
 
-      return;
+    // 3) Поднимаемся вверх до секции, но НЕ выше чем нужно:
+    // стопаемся, если предок содержит title или buttons (это верх)
+    var section = marker;
+    while (section.parent().length && section.parent()[0] !== root[0]) {
+      var p = section.parent();
+
+      if (p.find(titleSel).length) break;
+      if (p.find(buttonsSel).length) break;
+
+      section = p;
     }
 
-    // 3) Если по каким-то причинам не нашли маркер и не сработали quickSelectors:
-    // сворачиваем всё ниже первой “панели кнопок” (обычно достаточно для минимализма)
-    if (!anyQuick) {
-      var buttons = body.find('.full-start__buttons, .full-start-new__buttons, .buttons--container, .full-start__button, .view--trailer').first();
-      if (buttons.length) {
-        var topBlock = buttons;
-        while (topBlock.length && topBlock.parent().length && topBlock.parent()[0] !== body[0]) {
-          topBlock = topBlock.parent();
-        }
-        // скрываем всё, что идет после верхнего блока
-        topBlock.nextAll().each(function () {
-          $(this).attr('data-bgtrailer-min', '1').addClass('bgtrailer-minhide');
-        });
-      }
+    // Safety: если вдруг секция всё равно содержит кнопки/заголовок — не скрываем её целиком
+    if (section.find(titleSel).length || section.find(buttonsSel).length) {
+      // тогда прячем только ближайший “контентный” контейнер вокруг маркера
+      section = marker.parent();
     }
+
+    // 4) Скрываем секцию "Подробно" и то, что идёт после неё на том же уровне (нижнюю часть),
+    // но никогда не трогаем блоки с title/buttons
+    var parent = section.parent();
+    var pack = section.add(section.nextAll());
+
+    pack.each(function () {
+      var $el = $(this);
+
+      if ($el.find(titleSel).length) return;
+      if ($el.find(buttonsSel).length) return;
+
+      $el.attr('data-bgmin', '1').addClass('bgtrailer-minhide');
+    });
+
+    // 5) На всякий: возвращаем скролл наверх, чтобы “Подробно” не торчало в viewport
+    try {
+      var scroller = activityRender.find('.activity__body');
+      if (scroller.length) scroller.scrollTop(0);
+    } catch (e) {}
   }
 
   // ----------------- Backdrop Trailer class -----------------
@@ -267,7 +260,7 @@
 
     $('body').append(this.wrap).append(this.hint);
 
-    // фиксируем минимализм сразу (без “смены на большую версию”)
+    // СРАЗУ включаем минимализм, без “перехода на большую версию”
     try { applyMinimal(this.activity.render(), true); } catch (e) {}
 
     this.onActivity = function (e) {
@@ -277,6 +270,12 @@
 
     this.onToggle = function () {
       if (self.destroyed) return;
+
+      // при входе/выходе со страницы поддерживаем минимализм
+      try {
+        if (self.isOnThisFullStart()) applyMinimal(self.activity.render(), true);
+      } catch (e) {}
+
       if (!self.isOnThisFullStart()) self.pause(true);
       else self.play();
     };
@@ -306,7 +305,6 @@
     var self = this;
     if (!window.YT || !YT.Player) return this.destroy();
 
-    // autoplay надёжнее со стартом muted, потом снимаем mute
     var startMuted = true;
 
     this.player = new YT.Player(this.host[0], {
@@ -343,7 +341,7 @@
             self.started = true;
             document.body.classList.add('bgtrailer-on');
 
-            // ещё раз применим минимализм на случай если DOM дорисовался позже
+            // ещё раз — вдруг DOM “Подробно” догрузился позднее
             try { applyMinimal(self.activity.render(), true); } catch (e) {}
 
             if (self.autoSound) {
@@ -431,13 +429,11 @@
     try { Lampa.Controller.listener.remove('toggle', this.onToggle); } catch (e) {}
 
     try { if (this.player && this.player.destroy) this.player.destroy(); } catch (e) {}
-
     try { this.wrap.remove(); } catch (e) {}
     try { this.hint.remove(); } catch (e) {}
 
-    // возвращаем скрытые блоки
+    // вернуть UI
     try { applyMinimal(this.activity.render(), false); } catch (e) {}
-
     try { this.activity.bg_trailer_ready = false; } catch (e) {}
   };
 
@@ -449,10 +445,7 @@
 
       if (!safeField(SETTINGS_SHOW, true)) return;
 
-      // только для активной карточки
       if (Lampa.Activity.active().activity !== e.object.activity) return;
-
-      // защита от дубля
       if (e.object.activity.bg_trailer_ready) return;
 
       var trailer = pickTrailer(e.data);
