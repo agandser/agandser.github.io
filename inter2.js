@@ -46,7 +46,7 @@
     }
   } catch (e) {}
 
-  // ----------------- CSS -----------------
+  // ----------------- CSS (минимально и безопасно) -----------------
   var css = [
     "<style>",
     ".cardify-bgtrailer{position:fixed;inset:-12% 0;overflow:hidden;pointer-events:none;opacity:0;transition:opacity .45s ease;z-index:1;}",
@@ -54,7 +54,7 @@
     ".cardify-bgtrailer__host{position:absolute;inset:0;}",
     ".cardify-bgtrailer iframe{position:absolute;top:50%;left:50%;width:160vw;height:90vw;min-width:100%;min-height:100%;transform:translate(-50%,-50%);border:0;}",
 
-    /* минималистичное затемнение */
+    /* лёгкое затемнение — не “мыло” */
     ".cardify-bgtrailer__shade{position:absolute;inset:0;background:linear-gradient(90deg, rgba(0,0,0,.28) 0%, rgba(0,0,0,.08) 55%, rgba(0,0,0,.18) 100%);}",
     ".cardify-bgtrailer__vignette{position:absolute;inset:0;background:radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 0%, rgba(0,0,0,.08) 72%, rgba(0,0,0,.14) 100%);}",
 
@@ -65,17 +65,14 @@
     ".cardify-bgtrailer__hint svg{width:1.5em;height:1.5em;opacity:.9;}",
     ".cardify-bgtrailer__hint span{font-size:1.05em;opacity:.95;}",
 
-    /* прячем статичный backdrop только когда видео реально играет */
+    /* статику фона гасим только когда видео реально PLAYING */
     "body.bgtrailer-on .full-start__background{opacity:0 !important;}",
     "body.bgtrailer-on .full-start, body.bgtrailer-on .full-start-new{position:relative;z-index:2;}",
-
-    /* класс для скрытия “нижнего” контента */
-    ".bgtrailer-minhide{opacity:0 !important;max-height:0 !important;overflow:hidden !important;margin:0 !important;padding:0 !important;pointer-events:none !important;transition:all .25s ease !important;}",
     "</style>"
   ].join("\n");
   try { $('body').append(css); } catch (e) {}
 
-  // ----------------- YouTube API loader -----------------
+  // ----------------- YT API loader -----------------
   var ytWaiters = [];
   var ytLoading = false;
 
@@ -129,37 +126,13 @@
     return pool[0] || null;
   }
 
-  // ----------------- Minimalism: Cardify-like (keep top, hide only "Подробно" block) -----------------
+  // ----------------- Minimalism “как в Cardify”: обрезаем по "Подробно" -----------------
   function norm(t) {
     return (t || '').replace(/\s+/g, ' ').trim().toLowerCase();
   }
 
-  function isAfter(anchorEl, nodeEl) {
-    try {
-      return !!(anchorEl.compareDocumentPosition(nodeEl) & Node.DOCUMENT_POSITION_FOLLOWING);
-    } catch (e) { return true; }
-  }
-
-  function applyMinimal(activityRender, enable) {
-    if (!activityRender || !activityRender.length) return;
-
-    var root = activityRender.find('.full-start-new, .full-start').first();
-    if (!root.length) root = activityRender;
-
-    // Снять минимализм
-    if (!enable) {
-      root.find('[data-bgmin="1"]').each(function () {
-        $(this).removeAttr('data-bgmin').removeClass('bgtrailer-minhide');
-      });
-      return;
-    }
-
-    // 1) Находим “якорь” верхнего UI (кнопки/панель)
-    var btnWrap = root.find('.full-start__buttons, .full-start-new__buttons, .buttons--container').first();
-    if (!btnWrap.length) btnWrap = root.find('.full-start__button, .button--play, .view--trailer').first();
-    var anchor = btnWrap.length ? btnWrap[0] : null;
-
-    // 2) Ищем маркер “Подробно/Подробнее/Details…” ПОСЛЕ кнопок
+  function findDetailsMarker(root, anchorEl) {
+    // Ищем «Подробно»/«Подробнее»/Details и берём тот, что ниже кнопок
     var needles = ['подробно', 'подробнее', 'details', 'more', 'about'];
     var marker = null;
 
@@ -174,57 +147,100 @@
       }
       if (!ok) return;
 
-      // если есть якорь — берём только то, что ниже кнопок
-      if (anchor && !isAfter(anchor, this)) return;
+      if (anchorEl) {
+        try {
+          var pos = anchorEl.compareDocumentPosition(this);
+          // marker должен быть ПОСЛЕ якоря
+          if (!(pos & Node.DOCUMENT_POSITION_FOLLOWING)) return;
+        } catch (e) {}
+      }
 
-      marker = $(this);
+      marker = this;
     });
 
-    if (!marker || !marker.length) return;
-
-    var titleSel = '.full-start__title, .full-start-new__title';
-    var buttonsSel = '.full-start__buttons, .full-start-new__buttons, .buttons--container, .full-start__button, .button--play, .view--trailer';
-
-    // 3) Поднимаемся вверх до секции, но НЕ выше чем нужно:
-    // стопаемся, если предок содержит title или buttons (это верх)
-    var section = marker;
-    while (section.parent().length && section.parent()[0] !== root[0]) {
-      var p = section.parent();
-
-      if (p.find(titleSel).length) break;
-      if (p.find(buttonsSel).length) break;
-
-      section = p;
-    }
-
-    // Safety: если вдруг секция всё равно содержит кнопки/заголовок — не скрываем её целиком
-    if (section.find(titleSel).length || section.find(buttonsSel).length) {
-      // тогда прячем только ближайший “контентный” контейнер вокруг маркера
-      section = marker.parent();
-    }
-
-    // 4) Скрываем секцию "Подробно" и то, что идёт после неё на том же уровне (нижнюю часть),
-    // но никогда не трогаем блоки с title/buttons
-    var parent = section.parent();
-    var pack = section.add(section.nextAll());
-
-    pack.each(function () {
-      var $el = $(this);
-
-      if ($el.find(titleSel).length) return;
-      if ($el.find(buttonsSel).length) return;
-
-      $el.attr('data-bgmin', '1').addClass('bgtrailer-minhide');
-    });
-
-    // 5) На всякий: возвращаем скролл наверх, чтобы “Подробно” не торчало в viewport
-    try {
-      var scroller = activityRender.find('.activity__body');
-      if (scroller.length) scroller.scrollTop(0);
-    } catch (e) {}
+    return marker;
   }
 
-  // ----------------- Backdrop Trailer class -----------------
+  function getScroller(activityRender) {
+    var sc = activityRender.find('.activity__body').first();
+    if (!sc.length) sc = activityRender;
+    return sc[0] || null;
+  }
+
+  function applyMinimalClip(activityRender, enable) {
+    if (!activityRender || !activityRender.length) return;
+
+    var scroller = getScroller(activityRender);
+    if (!scroller) return;
+
+    if (!enable) {
+      if (scroller.dataset && scroller.dataset.bgminSaved === '1') {
+        scroller.style.overflow = scroller.dataset.bgminOverflow || '';
+        scroller.style.height = scroller.dataset.bgminHeight || '';
+        scroller.style.maxHeight = scroller.dataset.bgminMaxHeight || '';
+        scroller.style.paddingBottom = scroller.dataset.bgminPad || '';
+        scroller.style.webkitMaskImage = scroller.dataset.bgminMask || '';
+        delete scroller.dataset.bgminSaved;
+        delete scroller.dataset.bgminOverflow;
+        delete scroller.dataset.bgminHeight;
+        delete scroller.dataset.bgminMaxHeight;
+        delete scroller.dataset.bgminPad;
+        delete scroller.dataset.bgminMask;
+      }
+      return;
+    }
+
+    // Сохраняем исходные стили один раз
+    if (scroller.dataset && scroller.dataset.bgminSaved !== '1') {
+      scroller.dataset.bgminSaved = '1';
+      scroller.dataset.bgminOverflow = scroller.style.overflow || '';
+      scroller.dataset.bgminHeight = scroller.style.height || '';
+      scroller.dataset.bgminMaxHeight = scroller.style.maxHeight || '';
+      scroller.dataset.bgminPad = scroller.style.paddingBottom || '';
+      scroller.dataset.bgminMask = scroller.style.webkitMaskImage || '';
+    }
+
+    // Якорь: кнопки (чтобы "Подробно" искалось ниже них)
+    var root = activityRender.find('.full-start, .full-start-new').first();
+    if (!root.length) root = activityRender;
+
+    var btnWrap = root.find('.full-start__buttons, .full-start-new__buttons, .buttons--container').first();
+    if (!btnWrap.length) btnWrap = root.find('.full-start__button, .button--play, .view--trailer').first();
+    var anchorEl = btnWrap.length ? btnWrap[0] : null;
+
+    var marker = findDetailsMarker(root, anchorEl);
+
+    var limitPx = 0;
+
+    if (marker) {
+      var r = marker.getBoundingClientRect();
+      // обрезаем чуть выше заголовка "Подробно"
+      limitPx = Math.max(260, Math.floor(r.top - 10));
+    } else if (anchorEl) {
+      var br = anchorEl.getBoundingClientRect();
+      // запас, но не настолько, чтобы "Подробно" вылезало
+      limitPx = Math.max(320, Math.floor(br.bottom + 90));
+    } else {
+      limitPx = Math.floor(window.innerHeight * 0.60);
+    }
+
+    // Ограничиваем, чтобы не получилось криво на маленьких/больших
+    var maxLimit = Math.floor(window.innerHeight * 0.72);
+    limitPx = Math.min(limitPx, maxLimit);
+
+    // Сбрасываем скролл вверх и клипуем
+    try { scroller.scrollTop = 0; } catch (e) {}
+
+    scroller.style.overflow = 'hidden';
+    scroller.style.height = limitPx + 'px';
+    scroller.style.maxHeight = limitPx + 'px';
+
+    // Мягкий “фейд” снизу как у cardify (не обязательно, но красиво)
+    scroller.style.webkitMaskImage =
+      'linear-gradient(to bottom, rgba(255,255,255,1) 0%, rgba(255,255,255,1) 86%, rgba(255,255,255,0) 100%)';
+  }
+
+  // ----------------- Backdrop Trailer -----------------
   function BackdropTrailer(fullObject, trailer) {
     var self = this;
 
@@ -233,7 +249,6 @@
     this.trailer = trailer;
 
     this.destroyed = false;
-    this.started = false;
 
     this.showEnabled = !!safeField(SETTINGS_SHOW, true);
     this.autoSound = !!safeField(SETTINGS_SOUND, true);
@@ -257,11 +272,17 @@
     ].join(''));
 
     this.host = this.wrap.find('.cardify-bgtrailer__host');
-
     $('body').append(this.wrap).append(this.hint);
 
-    // СРАЗУ включаем минимализм, без “перехода на большую версию”
-    try { applyMinimal(this.activity.render(), true); } catch (e) {}
+    // СРАЗУ минимализм (без "потом большая версия")
+    try {
+      applyMinimalClip(this.activity.render(), true);
+      // на всякий случай — ещё пару раз после дорисовки
+      this._minTimers = [
+        setTimeout(function(){ if(!self.destroyed) applyMinimalClip(self.activity.render(), true); }, 250),
+        setTimeout(function(){ if(!self.destroyed) applyMinimalClip(self.activity.render(), true); }, 800)
+      ];
+    } catch (e) {}
 
     this.onActivity = function (e) {
       if (!e || e.type !== 'destroy') return;
@@ -271,13 +292,13 @@
     this.onToggle = function () {
       if (self.destroyed) return;
 
-      // при входе/выходе со страницы поддерживаем минимализм
-      try {
-        if (self.isOnThisFullStart()) applyMinimal(self.activity.render(), true);
-      } catch (e) {}
-
-      if (!self.isOnThisFullStart()) self.pause(true);
-      else self.play();
+      // держим минимализм только на full_start
+      if (self.isOnThisFullStart()) {
+        try { applyMinimalClip(self.activity.render(), true); } catch (e) {}
+        self.play();
+      } else {
+        self.pause(true);
+      }
     };
 
     this.onAnyKeyDown = function () {
@@ -305,8 +326,6 @@
     var self = this;
     if (!window.YT || !YT.Player) return this.destroy();
 
-    var startMuted = true;
-
     this.player = new YT.Player(this.host[0], {
       videoId: this.trailer.id,
       playerVars: {
@@ -323,7 +342,7 @@
         iv_load_policy: 3,
         loop: 1,
         playlist: this.trailer.id,
-        mute: startMuted ? 1 : 0
+        mute: 1
       },
       events: {
         onReady: function () {
@@ -332,17 +351,16 @@
             if (!self.showEnabled) return;
             if (!self.isOnThisFullStart()) return;
             self.play();
-          }, 600);
+          }, 400);
         },
         onStateChange: function (st) {
           if (self.destroyed) return;
 
           if (st.data === YT.PlayerState.PLAYING) {
-            self.started = true;
             document.body.classList.add('bgtrailer-on');
 
-            // ещё раз — вдруг DOM “Подробно” догрузился позднее
-            try { applyMinimal(self.activity.render(), true); } catch (e) {}
+            // ещё раз фиксируем минимализм на "PLAYING"
+            try { applyMinimalClip(self.activity.render(), true); } catch (e) {}
 
             if (self.autoSound) {
               var already = !!safeField(SETTINGS_UNMUTED_ONCE, false);
@@ -371,9 +389,7 @@
             try { self.player.seekTo(0, true); self.player.playVideo(); } catch (e) {}
           }
         },
-        onError: function () {
-          self.destroy();
-        }
+        onError: function () { self.destroy(); }
       }
     });
   };
@@ -428,12 +444,15 @@
     try { Lampa.Listener.remove('activity', this.onActivity); } catch (e) {}
     try { Lampa.Controller.listener.remove('toggle', this.onToggle); } catch (e) {}
 
+    try { if (this._minTimers) this._minTimers.forEach(function (t) { clearTimeout(t); }); } catch (e) {}
+
     try { if (this.player && this.player.destroy) this.player.destroy(); } catch (e) {}
     try { this.wrap.remove(); } catch (e) {}
     try { this.hint.remove(); } catch (e) {}
 
-    // вернуть UI
-    try { applyMinimal(this.activity.render(), false); } catch (e) {}
+    // вернуть полный вид (отмена клипа)
+    try { applyMinimalClip(this.activity.render(), false); } catch (e) {}
+
     try { this.activity.bg_trailer_ready = false; } catch (e) {}
   };
 
