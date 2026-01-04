@@ -47,7 +47,7 @@
   }
 
   // -----------------------------
-  // Trailer selection (как в оригинале)
+  // Trailer selection
   // -----------------------------
   function pickTrailer(data) {
     if (data && data.videos && data.videos.results && data.videos.results.length) {
@@ -98,35 +98,26 @@
     this.playing = false;
     this.destroyed = false;
 
-    // 1) Находим фон. Важно: иногда это IMG.
     this.bgNode = this.activity.render().find('.full-start__background').eq(0);
 
-    // 2) Holder — куда реально можно вставить слой.
-    this.holder = this.bgNode;
-
+    // если фон = IMG, нельзя append в IMG, и нельзя append в конец родителя (будет поверх текста)
+    this.isBgImg = false;
     if (this.bgNode.length) {
       var tag = (this.bgNode[0].tagName || '').toLowerCase();
-      if (tag === 'img') this.holder = this.bgNode.parent();
+      this.isBgImg = tag === 'img';
     }
 
-    if (!this.holder || !this.holder.length) {
-      // fallback — хотя обычно не понадобится
-      this.holder = this.activity.render().find('.activity__body').eq(0);
-    }
-
-    // 3) Статичная картинка фона (которую будем гасить при старте видео)
+    // статичная картинка, которую гасим
     this.bgImg = null;
     if (this.bgNode.length) {
       var tag2 = (this.bgNode[0].tagName || '').toLowerCase();
       if (tag2 === 'img') this.bgImg = this.bgNode;
       else {
-        // если фон контейнер, внутри обычно есть img
         this.bgImg = this.bgNode.find('img').eq(0);
         if (!this.bgImg.length) this.bgImg = null;
       }
     }
 
-    // DOM layer
     this.html = $(
       '<div class="cardify-bgvideo">' +
         '<div class="cardify-bgvideo__iframe"></div>' +
@@ -138,10 +129,18 @@
     this.iframeHost = this.html.find('.cardify-bgvideo__iframe');
     this.hint = this.html.find('.cardify-bgvideo__hint');
 
-    // Вставляем в holder (а не в img)
-    this.holder.append(this.html);
+    // !!! ВАЖНО: вставляем слой так, чтобы он был "между" фоном и UI
+    if (this.bgNode.length && this.isBgImg) {
+      // вставить СРАЗУ ПОСЛЕ img-фона (а не append в конец родителя)
+      this.bgNode.after(this.html);
+    } else if (this.bgNode.length) {
+      // если это контейнер, можно внутрь
+      this.bgNode.append(this.html);
+    } else {
+      // fallback
+      this.activity.render().find('.activity__body').eq(0).prepend(this.html);
+    }
 
-    // Keydown для unmute по OK/Enter
     this.onKeyDown = function (e) {
       if (_this.destroyed) return;
       if (!_this.isActive()) return;
@@ -159,8 +158,7 @@
 
   BgPlayer.prototype.isActive = function () {
     try {
-      return Lampa.Activity.active().activity === this.activity &&
-        Lampa.Controller.enabled().name === 'full_start';
+      return Lampa.Activity.active().activity === this.activity;
     } catch (e) { return false; }
   };
 
@@ -171,7 +169,6 @@
         else this.bgNode.removeClass('bgvideo-on');
       }
       if (this.bgImg && this.bgImg.length) {
-        // На всякий — прямым стилем тоже
         this.bgImg.css('opacity', hide ? '0' : '');
       }
     } catch (e) {}
@@ -219,7 +216,7 @@
             _this.playing = true;
             _this.html.addClass('playing');
 
-            // вот тут “фон заменяется”: гасим статичное
+            // скрываем статику только когда реально играет
             _this.setStaticHidden(true);
 
             // пробуем звук
@@ -320,11 +317,10 @@
 
     this.player = new BgPlayer(this.activity, video);
 
+    // !!! ВАЖНО: НЕ гасим при смене контроллера (прокрутка вниз)
     this.onToggle = function () {
-      if (!_this.same()) return;
-
-      if (Lampa.Controller.enabled().name === 'full_start') _this.player.play();
-      else _this.player.pause();
+      if (!_this.same()) _this.player.pause();
+      else _this.player.play();
     };
 
     this.onActivity = function (e) {
@@ -350,7 +346,7 @@
   };
 
   // -----------------------------
-  // Main plugin start (Cardify UI + bg trailer)
+  // Main plugin
   // -----------------------------
   function startPlugin() {
     if (!isTV()) return;
@@ -379,40 +375,50 @@
       });
     } catch (e) {}
 
-    // Template (минимализм)
+    // Template (как у тебя было, НО + buttons--container чтобы не пропадала кнопка "смотреть")
     try {
       Lampa.Template.add('full_start_new',
-        "<div class=\"full-start-new cardify\">\n" +
-        "  <div class=\"full-start-new__body\">\n" +
-        "    <div class=\"full-start-new__left hide\">\n" +
-        "      <div class=\"full-start-new__poster\">\n" +
-        "        <img class=\"full-start-new__img full--poster\" />\n" +
-        "      </div>\n" +
-        "    </div>\n" +
-        "    <div class=\"full-start-new__right\">\n" +
-        "      <div class=\"cardify__left\">\n" +
-        "        <div class=\"full-start-new__head\"></div>\n" +
-        "        <div class=\"full-start-new__title\">{title}</div>\n" +
-        "        <div class=\"cardify__details\"><div class=\"full-start-new__details\"></div></div>\n" +
-        "        <div class=\"full-start-new__buttons\">\n" +
-        "          <div class=\"full-start__button selector button--play\"><span>#{title_watch}</span></div>\n" +
-        "          <div class=\"full-start__button selector button--book\"><span>#{settings_input_links}</span></div>\n" +
-        "          <div class=\"full-start__button selector button--reaction\"><span>#{title_reactions}</span></div>\n" +
-        "          <div class=\"full-start__button selector button--options\"></div>\n" +
-        "        </div>\n" +
-        "      </div>\n" +
-        "      <div class=\"cardify__right\">\n" +
-        "        <div class=\"full-start-new__reactions selector\"><div>#{reactions_none}</div></div>\n" +
-        "        <div class=\"full-start-new__rate-line\"><div class=\"full-start__pg hide\"></div><div class=\"full-start__status hide\"></div></div>\n" +
-        "      </div>\n" +
-        "    </div>\n" +
-        "  </div>\n" +
+        "<div class=\"full-start-new cardify\">" +
+          "<div class=\"full-start-new__body\">" +
+            "<div class=\"full-start-new__left hide\">" +
+              "<div class=\"full-start-new__poster\">" +
+                "<img class=\"full-start-new__img full--poster\" />" +
+              "</div>" +
+            "</div>" +
+            "<div class=\"full-start-new__right\">" +
+              "<div class=\"cardify__left\">" +
+                "<div class=\"full-start-new__head\"></div>" +
+                "<div class=\"full-start-new__title\">{title}</div>" +
+                "<div class=\"cardify__details\"><div class=\"full-start-new__details\"></div></div>" +
+                "<div class=\"full-start-new__buttons\">" +
+                  "<div class=\"full-start__button selector button--play\"><span>#{title_watch}</span></div>" +
+                  "<div class=\"full-start__button selector button--book\"><span>#{settings_input_links}</span></div>" +
+                  "<div class=\"full-start__button selector button--reaction\"><span>#{title_reactions}</span></div>" +
+                  "<div class=\"full-start__button selector button--options\"></div>" +
+                "</div>" +
+              "</div>" +
+              "<div class=\"cardify__right\">" +
+                "<div class=\"full-start-new__reactions selector\"><div>#{reactions_none}</div></div>" +
+                "<div class=\"full-start-new__rate-line\"><div class=\"full-start__pg hide\"></div><div class=\"full-start__status hide\"></div></div>" +
+              "</div>" +
+            "</div>" +
+          "</div>" +
+
+          // !!! КРИТИЧНО: этот блок нужен Lampa, иначе при прокрутке вниз она может "переключить" кнопки и всё исчезнет
+          "<div class=\"hide buttons--container\">" +
+            "<div class=\"full-start__button view--torrent hide\">" +
+              "<span>#{full_torrents}</span>" +
+            "</div>" +
+            "<div class=\"full-start__button selector view--trailer\">" +
+              "<span>#{full_trailers}</span>" +
+            "</div>" +
+          "</div>" +
         "</div>"
       );
     } catch (e) {}
 
-    // CSS (cardify + bg trailer) + важное: скрытие статики
-    var cssText =
+    // CSS (твои стили + bg video)
+    addOnceStyle('cardify_bgtrailer_css',
       ".cardify{-webkit-transition:all .3s;transition:all .3s}" +
       ".cardify .full-start-new__body{height:80vh}" +
       ".cardify .full-start-new__right{display:flex;align-items:flex-end}" +
@@ -422,19 +428,18 @@
       ".cardify__background{left:0;overflow:hidden}" +
       "body:not(.menu--open) .cardify__background{-webkit-mask-image:-webkit-linear-gradient(top,white 50%,rgba(255,255,255,0) 100%);mask-image:linear-gradient(to bottom,white 50%,rgba(255,255,255,0) 100%)}" +
 
-      // BG video layer (поверх статики, но под UI)
-      ".cardify-bgvideo{position:absolute;inset:-60% 0;display:flex;align-items:center;pointer-events:none;opacity:0;transition:opacity .35s;z-index:3}" +
+      // BG video layer (важно: без завышенного z-index)
+      ".cardify-bgvideo{position:absolute;inset:-60% 0;display:flex;align-items:center;pointer-events:none;opacity:0;transition:opacity .35s;z-index:0}" +
       ".cardify-bgvideo.playing{opacity:1}" +
       ".cardify-bgvideo iframe{border:0;width:100%;height:100%}" +
-      ".cardify-bgvideo__shade{position:absolute;inset:0;background:linear-gradient(90deg, rgba(0,0,0,.28) 0%, rgba(0,0,0,.10) 55%, rgba(0,0,0,.22) 100%);z-index:4}" +
-      ".cardify-bgvideo__hint{position:absolute;right:1.2em;bottom:1.2em;padding:.55em .95em;border-radius:1.6em;background:rgba(0,0,0,.22);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);opacity:0;transform:translate3d(0,10px,0);transition:all .25s;font-size:1.05em;z-index:5}" +
+      ".cardify-bgvideo__shade{position:absolute;inset:0;background:linear-gradient(90deg, rgba(0,0,0,.28) 0%, rgba(0,0,0,.10) 55%, rgba(0,0,0,.22) 100%);z-index:1}" +
+      ".cardify-bgvideo__hint{position:absolute;right:1.2em;bottom:1.2em;padding:.55em .95em;border-radius:1.6em;background:rgba(0,0,0,.22);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);opacity:0;transform:translate3d(0,10px,0);transition:all .25s;font-size:1.05em;z-index:2}" +
       ".cardify-bgvideo__hint.show{opacity:.9;transform:translate3d(0,0,0)}" +
 
       // Скрытие статичного фона при старте видео
       ".full-start__background.bgvideo-on{background-image:none !important}" +
-      ".full-start__background.bgvideo-on>img{opacity:0 !important;transition:opacity .25s}";
-
-    addOnceStyle('cardify_bgtrailer_css', cssText);
+      ".full-start__background.bgvideo-on>img{opacity:0 !important;transition:opacity .25s}"
+    );
 
     // Settings UI
     try {
@@ -457,11 +462,8 @@
       if (e.object && e.object.activity && e.object.activity.bgtrailer_ready) return;
 
       try { if (Lampa.Activity.active().activity !== e.object.activity) return; } catch (err2) {}
-      try {
-        if (Lampa.Manifest && Lampa.Manifest.app_digital && Lampa.Manifest.app_digital < 220) return;
-      } catch (err3) {}
 
-      // делаем фон "cardify__background" (как оригинал)
+      // как в оригинале — класс на фон
       try { e.object.activity.render().find('.full-start__background').addClass('cardify__background'); } catch (err4) {}
 
       var trailer = pickTrailer(e.data);
