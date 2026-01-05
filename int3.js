@@ -1,27 +1,34 @@
 (function () {
   "use strict";
 
-  if (window.plugin_style_interface_cardify_final_v1) return;
-  window.plugin_style_interface_cardify_final_v1 = true;
+  if (window.plugin_style_interface_cardify_final_v2) return;
+  window.plugin_style_interface_cardify_final_v2 = true;
 
-  // Ждём Lampa/appready
+  // -----------------------------
+  // Boot wait
+  // -----------------------------
   var bootTimer = setInterval(function () {
     if (window.Lampa && window["app" + "re" + "ady"]) {
       clearInterval(bootTimer);
-      try { init(); } catch (e) { console.log("final plugin init error", e); }
+      try {
+        init();
+      } catch (e) {
+        console.log("final plugin init error", e);
+      }
     }
   }, 200);
 
   function init() {
     if (!window.Lampa) return;
 
-    // TV режим (как у тебя)
-    try { Lampa.Platform.tv(); } catch (e) {}
+    try {
+      Lampa.Platform.tv();
+    } catch (e) {}
 
     if (!Lampa.Maker || !Lampa.Maker.map || !Lampa.Utils || !Lampa.Template) return;
 
     // -----------------------------
-    // Shared helpers
+    // Utils / Shared
     // -----------------------------
     function addOnceStyle(id, cssText) {
       try {
@@ -53,10 +60,35 @@
 
       var prev = window.onYouTubeIframeAPIReady;
       window.onYouTubeIframeAPIReady = function () {
-        try { if (typeof prev === "function") prev(); } catch (e) {}
+        try {
+          if (typeof prev === "function") prev();
+        } catch (e) {}
         cb();
       };
     }
+
+    function shouldEnableInterface(object) {
+      if (!object) return false;
+      if (window.innerWidth < 767) return false;
+      if (Lampa.Platform.screen("mobile")) return false;
+      if (object.title === "Избранное") return false;
+      return true;
+    }
+
+    function wrapMethod(object, methodName, wrapper) {
+      if (!object) return;
+      var originalMethod = typeof object[methodName] === "function" ? object[methodName] : null;
+      object[methodName] = function () {
+        var args = Array.prototype.slice.call(arguments);
+        return wrapper.call(this, originalMethod, args);
+      };
+    }
+
+    // -----------------------------
+    // TMDB detail cache / coalescing
+    // -----------------------------
+    var globalInfoCache = {}; // url -> response
+    var globalPending = {}; // url -> [callbacks]
 
     function buildTmdbDetailUrl(data, append) {
       if (!data || !data.id) return "";
@@ -68,7 +100,6 @@
       var mediaType = data.media_type === "tv" || data.name ? "tv" : "movie";
       var language = Lampa.Storage.get("language") || Lampa.Storage.field("tmdb_lang") || "ru";
 
-      // ВАЖНО: используем тот же стиль, что в твоём плагине (query внутри аргумента api())
       return Lampa.TMDB.api(
         mediaType +
           "/" +
@@ -82,22 +113,42 @@
       );
     }
 
-    // Общий кеш для detail-вызовов (и инфопанель, и трейлеры)
-    var globalInfoCache = {};
-    var globalRequest = new Lampa.Reguest();
-
     function ensureDetails(data, append, cb) {
       var url = buildTmdbDetailUrl(data, append);
       if (!url) return cb(null);
 
       if (globalInfoCache[url]) return cb(globalInfoCache[url]);
 
-      globalRequest.silent(url, function (resp) {
-        globalInfoCache[url] = resp;
-        cb(resp);
-      }, function () {
-        cb(null);
-      });
+      if (globalPending[url]) {
+        globalPending[url].push(cb);
+        return;
+      }
+
+      globalPending[url] = [cb];
+
+      var req = new Lampa.Reguest();
+      req.silent(
+        url,
+        function (resp) {
+          globalInfoCache[url] = resp;
+          var arr = globalPending[url] || [];
+          delete globalPending[url];
+          arr.forEach(function (fn) {
+            try {
+              fn(resp);
+            } catch (e) {}
+          });
+        },
+        function () {
+          var arr2 = globalPending[url] || [];
+          delete globalPending[url];
+          arr2.forEach(function (fn) {
+            try {
+              fn(null);
+            } catch (e) {}
+          });
+        },
+      );
     }
 
     function pickTrailerFromDetails(details) {
@@ -106,7 +157,6 @@
       var items = [];
       details.videos.results.forEach(function (v) {
         if (!v || !v.key) return;
-        // берём только YouTube, иначе iframe_api бессмысленен
         if (v.site && (v.site + "").toLowerCase() !== "youtube") return;
 
         items.push({
@@ -114,39 +164,91 @@
           code: v.iso_639_1,
           type: (v.type || "").toLowerCase(),
           time: v.published_at ? new Date(v.published_at).getTime() : 0,
-          name: v.name || ""
         });
       });
 
       if (!items.length) return null;
 
-      // приоритет: Trailer/Teaser, затем по свежести, затем язык
       var lang = "";
-      try { lang = Lampa.Storage.field("tmdb_lang") || Lampa.Storage.get("language") || "ru"; } catch (e) {}
+      try {
+        lang = Lampa.Storage.field("tmdb_lang") || Lampa.Storage.get("language") || "ru";
+      } catch (e) {}
 
-      // сортировка по "лучшести"
       items.sort(function (a, b) {
-        // тип
-        var ap = (a.type === "trailer") ? 2 : (a.type === "teaser" ? 1 : 0);
-        var bp = (b.type === "trailer") ? 2 : (b.type === "teaser" ? 1 : 0);
+        var ap = a.type === "trailer" ? 2 : a.type === "teaser" ? 1 : 0;
+        var bp = b.type === "trailer" ? 2 : b.type === "teaser" ? 1 : 0;
         if (ap !== bp) return bp - ap;
-        // свежесть
         if (a.time !== b.time) return b.time - a.time;
         return 0;
       });
 
-      // язык: сначала текущий, потом en, потом любой
-      var my = items.filter(function (x) { return x.code === lang; });
-      var en = items.filter(function (x) { return x.code === "en"; });
+      var my = items.filter(function (x) {
+        return x.code === lang;
+      });
+      var en = items.filter(function (x) {
+        return x.code === "en";
+      });
 
-      return (my[0] || en[0] || items[0]) || null;
+      return my[0] || en[0] || items[0] || null;
     }
 
     // -----------------------------
-    // 1) CARDIFY: вернуть минимализм (шаблон + css) + автотрейлер на full
+    // Global stop helpers (catalog trailer)
+    // -----------------------------
+    if (!window.__final_catalog_trailers) window.__final_catalog_trailers = [];
+
+    function stopAllCatalogTrailers(opts) {
+      var destroy = opts && opts.destroy;
+
+      try {
+        window.__final_catalog_trailers = (window.__final_catalog_trailers || []).filter(function (t) {
+          return !!t;
+        });
+
+        window.__final_catalog_trailers.forEach(function (t) {
+          try {
+            if (destroy) t.destroy();
+            else t.stop();
+          } catch (e) {}
+        });
+
+        if (destroy) window.__final_catalog_trailers = [];
+      } catch (e2) {}
+    }
+
+    // Доп. страховка: глушим ВСЕ youtube iframe (кроме Cardify/full)
+    function stopCatalogYoutubeIframes() {
+      try {
+        var frames = document.querySelectorAll('iframe[src*="youtube.com"], iframe[src*="youtube-nocookie.com"]');
+
+        frames.forEach(function (fr) {
+          // НЕ трогаем трейлер на странице фильма (Cardify / full-start-new)
+          if (fr.closest(".full-start-new, .cardify, .cardify-bgtrailer")) return;
+
+          try {
+            fr.contentWindow.postMessage('{"event":"command","func":"pauseVideo","args":""}', "*");
+            fr.contentWindow.postMessage('{"event":"command","func":"stopVideo","args":""}', "*");
+            fr.contentWindow.postMessage('{"event":"command","func":"mute","args":""}', "*");
+          } catch (e) {}
+
+          // жёсткая страховка: перезагрузка src
+          try {
+            var src = fr.getAttribute("src") || "";
+            if (src) fr.setAttribute("src", src);
+          } catch (e2) {}
+        });
+      } catch (e3) {}
+    }
+
+    function stopCatalogAudioEverywhere(opts) {
+      stopAllCatalogTrailers(opts);
+      stopCatalogYoutubeIframes();
+    }
+
+    // -----------------------------
+    // 1) CARDIFY TEMPLATE + CSS (вернёт минималистичные кнопки на full)
     // -----------------------------
     function installCardifyTemplateAndCss() {
-      // Шаблон Cardify (как в твоём коде)
       Lampa.Template.add(
         "full_start_new",
         `<div class="full-start-new cardify">
@@ -158,7 +260,6 @@
               </div>
 
               <div class="full-start-new__right">
-                  
                   <div class="cardify__left">
                       <div class="full-start-new__head"></div>
                       <div class="full-start-new__title">{title}</div>
@@ -173,7 +274,6 @@
                                   <circle cx="14" cy="14.5" r="13" stroke="currentColor" stroke-width="2.7"/>
                                   <path d="M18.0739 13.634C18.7406 14.0189 18.7406 14.9811 18.0739 15.366L11.751 19.0166C11.0843 19.4015 10.251 18.9204 10.251 18.1506L10.251 10.8494C10.251 10.0796 11.0843 9.5985 11.751 9.9834L18.0739 13.634Z" fill="currentColor"/>
                               </svg>
-
                               <span>#{title_watch}</span>
                           </div>
 
@@ -181,7 +281,6 @@
                               <svg width="21" height="32" viewBox="0 0 21 32" fill="none" xmlns="http://www.w3.org/2000/svg">
                               <path d="M2 1.5H19C19.2761 1.5 19.5 1.72386 19.5 2V27.9618C19.5 28.3756 19.0261 28.6103 18.697 28.3595L12.6212 23.7303C11.3682 22.7757 9.63183 22.7757 8.37885 23.7303L2.30302 28.3595C1.9739 28.6103 1.5 28.3756 1.5 27.9618V2C1.5 1.72386 1.72386 1.5 2 1.5Z" stroke="currentColor" stroke-width="2.5"/>
                               </svg>
-
                               <span>#{settings_input_links}</span>
                           </div>
 
@@ -189,8 +288,7 @@
                               <svg width="38" height="34" viewBox="0 0 38 34" fill="none" xmlns="http://www.w3.org/2000/svg">
                                   <path d="M37.208 10.9742C37.1364 10.8013 37.0314 10.6441 36.899 10.5117C36.7666 10.3794 36.6095 10.2744 36.4365 10.2028L12.0658 0.108375C11.7166 -0.0361828 11.3242 -0.0361227 10.9749 0.108542C10.6257 0.253206 10.3482 0.530634 10.2034 0.879836L0.108666 25.2507C0.0369593 25.4236 3.37953e-05 25.609 2.3187e-08 25.7962C-3.37489e-05 25.9834 0.0368249 26.1688 0.108469 26.3418C0.180114 26.5147 0.28514 26.6719 0.417545 26.8042C0.54995 26.9366 0.707139 27.0416 0.880127 27.1131L17.2452 33.8917C17.5945 34.0361 17.9869 34.0361 18.3362 33.8917L29.6574 29.2017C29.8304 29.1301 29.9875 29.0251 30.1199 28.8928C30.2523 28.7604 30.3573 28.6032 30.4289 28.4303L37.2078 12.065C37.2795 11.8921 37.3164 11.7068 37.3164 11.5196C37.3165 11.3325 37.2796 11.1471 37.208 10.9742ZM20.425 29.9407L21.8784 26.4316L25.3873 27.885L20.425 29.9407ZM28.3407 26.0222L21.6524 23.252C21.3031 23.1075 20.9107 23.1076 20.5615 23.2523C20.2123 23.3969 19.9348 23.6743 19.79 24.0235L17.0194 30.7123L3.28783 25.0247L12.2918 3.28773L34.0286 12.2912L28.3407 26.0222Z" fill="currentColor"/>
                                   <path d="M25.3493 16.976L24.258 14.3423L16.959 17.3666L15.7196 14.375L13.0859 15.4659L15.4161 21.0916L25.3493 16.976Z" fill="currentColor"/>
-                              </svg>                
-
+                              </svg>
                               <span>#{title_reactions}</span>
                           </div>
 
@@ -199,7 +297,6 @@
                               <path d="M6.01892 24C6.27423 27.3562 9.07836 30 12.5 30C15.9216 30 18.7257 27.3562 18.981 24H15.9645C15.7219 25.6961 14.2632 27 12.5 27C10.7367 27 9.27804 25.6961 9.03542 24H6.01892Z" fill="currentColor"/>
                               <path d="M3.81972 14.5957V10.2679C3.81972 5.41336 7.7181 1.5 12.5 1.5C17.2819 1.5 21.1803 5.41336 21.1803 10.2679V14.5957C21.1803 15.8462 21.5399 17.0709 22.2168 18.1213L23.0727 19.4494C24.2077 21.2106 22.9392 23.5 20.9098 23.5H4.09021C2.06084 23.5 0.792282 21.2106 1.9273 19.4494L2.78317 18.1213C3.46012 17.0709 3.81972 15.8462 3.81972 14.5957Z" stroke="currentColor" stroke-width="2.5"/>
                               </svg>
-
                               <span>#{title_subscribe}</span>
                           </div>
 
@@ -227,31 +324,22 @@
           </div>
 
           <div class="hide buttons--container">
-              <div class="full-start__button view--torrent hide">
-                  <svg xmlns="http://www.w3.org/2000/svg"  viewBox="0 0 50 50" width="50px" height="50px">
-                      <path d="M25,2C12.317,2,2,12.317,2,25s10.317,23,23,23s23-10.317,23-23S37.683,2,25,2z M40.5,30.963c-3.1,0-4.9-2.4-4.9-2.4 S34.1,35,27,35c-1.4,0-3.6-0.837-3.6-0.837l4.17,9.643C26.727,43.92,25.874,44,25,44c-2.157,0-4.222-0.377-6.155-1.039L9.237,16.851 c0,0-0.7-1.2,0.4-1.5c1.1-0.3,5.4-1.2,5.4-1.2s1.475-0.494,1.8,0.5c0.5,1.3,4.063,11.112,4.063,11.112S22.6,29,27.4,29 c4.7,0,5.9-3.437,5.7-3.937c-1.2-3-4.993-11.862-4.993-11.862s-0.6-1.1,0.8-1.4c1.4-0.3,3.8-0.7,3.8-0.7s1.105-0.163,1.6,0.8 c0.738,1.437,5.193,11.262,5.193,11.262s1.1,2.9,3.3,2.9c0.464,0,0.834-0.046,1.152-0.104c-0.082,1.635-0.348,3.221-0.817,4.722 C42.541,30.867,41.756,30.963,40.5,30.963z" fill="currentColor"/>
-                  </svg>
-
-                  <span>#{full_torrents}</span>
-              </div>
-
+              <div class="full-start__button view--torrent hide"></div>
               <div class="full-start__button selector view--trailer">
                   <svg height="70" viewBox="0 0 80 70" fill="none" xmlns="http://www.w3.org/2000/svg">
                       <path fill-rule="evenodd" clip-rule="evenodd" d="M71.2555 2.08955C74.6975 3.2397 77.4083 6.62804 78.3283 10.9306C80 18.7291 80 35 80 35C80 35 80 51.2709 78.3283 59.0694C77.4083 63.372 74.6975 66.7603 71.2555 67.9104C65.0167 70 40 70 40 70C40 70 14.9833 70 8.74453 67.9104C5.3025 66.7603 2.59172 63.372 1.67172 59.0694C0 51.2709 0 35 0 35C0 35 0 18.7291 1.67172 10.9306C2.59172 6.62804 5.3025 3.2395 8.74453 2.08955C14.9833 0 40 0 40 0C40 0 65.0167 0 71.2555 2.08955ZM55.5909 35.0004L29.9773 49.5714V20.4286L55.5909 35.0004Z" fill="currentColor"></path>
                   </svg>
-
                   <span>#{full_trailers}</span>
               </div>
           </div>
       </div>`,
       );
 
-      // CSS Cardify (как в твоём коде)
       Lampa.Template.add(
         "cardify_css",
         `
         <style>
-          .cardify{-webkit-transition:all .3s;-o-transition:all .3s;-moz-transition:all .3s;transition:all .3s}
+          .cardify{-webkit-transition:all .3s;transition:all .3s}
           .cardify .full-start-new__body{height:80vh}
           .cardify .full-start-new__right{display:flex;align-items:flex-end}
           .cardify .full-start-new__title{text-shadow:0 0 .1em rgba(0,0,0,0.3)}
@@ -279,7 +367,6 @@
       );
       $("body").append(Lampa.Template.get("cardify_css", {}, true));
 
-      // Стили фон-видео (full page)
       addOnceStyle(
         "final_cardify_bgtrailer_css",
         ".cardify-bgtrailer{opacity:0;transition:opacity .25s;pointer-events:none;position:absolute;top:-60%;bottom:-60%;left:0;width:100%;display:flex;align-items:center;z-index:0}" +
@@ -291,15 +378,14 @@
       );
     }
 
-    // Cardify bg трейлер (full page) — почти без изменений, но:
-    // - если videos нет, дотягиваем через ensureDetails(..., 'videos')
+    // -----------------------------
+    // 2) Cardify full-page background trailer (auto)
+    // -----------------------------
     function BgPlayer(activity, video, opts) {
       var _this = this;
-
       this.activity = activity;
       this.video = video;
       this.opts = opts || {};
-
       this.loaded = false;
       this.display = false;
 
@@ -309,9 +395,7 @@
       this.bgTag = this.bg.length ? (this.bg[0].tagName || "").toLowerCase() : "";
       this.bgIsImg = this.bgTag === "img";
 
-      this.html = $(
-        '<div class="cardify-bgtrailer">' + '<div class="cardify-bgtrailer__iframe"></div>' + "</div>",
-      );
+      this.html = $('<div class="cardify-bgtrailer"><div class="cardify-bgtrailer__iframe"></div></div>');
 
       if (this.bg.length) {
         if (this.bgIsImg) this.bg.after(this.html);
@@ -345,8 +429,9 @@
           events: {
             onReady: function () {
               _this.loaded = true;
-              try { _this.youtube.setPlaybackQuality("hd1080"); } catch (e) {}
-              // звук full page — по настройке
+              try {
+                _this.youtube.setPlaybackQuality("hd1080");
+              } catch (e) {}
               try {
                 if (_this.opts && _this.opts.sound === false) _this.youtube.mute();
                 else _this.youtube.unMute();
@@ -358,22 +443,21 @@
                 _this.html.addClass("display");
                 _this.setStaticHidden(true);
               }
-
               if (state.data === YT.PlayerState.PAUSED) {
                 _this.display = false;
                 _this.html.removeClass("display");
                 _this.setStaticHidden(false);
               }
-
               if (state.data === YT.PlayerState.ENDED) {
                 try {
                   _this.youtube.seekTo(0, true);
                   _this.youtube.playVideo();
                 } catch (e3) {}
               }
-
               if (state.data === YT.PlayerState.BUFFERING) {
-                try { state.target.setPlaybackQuality("hd1080"); } catch (e4) {}
+                try {
+                  state.target.setPlaybackQuality("hd1080");
+                } catch (e4) {}
               }
             },
             onError: function () {
@@ -388,31 +472,36 @@
     BgPlayer.prototype.setStaticHidden = function (hide) {
       try {
         if (!this.bg || !this.bg.length) return;
-
         this.bg.toggleClass("cardify-bgtrailer--on", !!hide);
 
         var img = this.bgIsImg ? this.bg : this.bg.find("img").eq(0);
         if (img && img.length) img.css("opacity", hide ? "0" : "");
       } catch (e) {}
     };
-
     BgPlayer.prototype.play = function () {
       if (!this.loaded) return;
-      try { this.youtube.playVideo(); } catch (e) {}
+      try {
+        this.youtube.playVideo();
+      } catch (e) {}
     };
-
     BgPlayer.prototype.pause = function () {
       if (!this.loaded) return;
-      try { this.youtube.pauseVideo(); } catch (e) {}
+      try {
+        this.youtube.pauseVideo();
+      } catch (e) {}
     };
-
     BgPlayer.prototype.destroy = function () {
       this.loaded = false;
       this.display = false;
-
-      try { this.setStaticHidden(false); } catch (e) {}
-      try { if (this.youtube && this.youtube.destroy) this.youtube.destroy(); } catch (e2) {}
-      try { this.html.remove(); } catch (e3) {}
+      try {
+        this.setStaticHidden(false);
+      } catch (e) {}
+      try {
+        if (this.youtube && this.youtube.destroy) this.youtube.destroy();
+      } catch (e2) {}
+      try {
+        this.html.remove();
+      } catch (e3) {}
     };
 
     function BgTrailer(object, video, opts) {
@@ -422,7 +511,6 @@
       this.object = object;
       this.video = video;
       this.opts = opts || {};
-
       this.player = new BgPlayer(object.activity, video, opts);
 
       this.timelauch = 1200;
@@ -430,7 +518,9 @@
 
       this.timerCheck = null;
 
-      this.onToggle = function () { _this.update(); };
+      this.onToggle = function () {
+        _this.update();
+      };
       this.onActivity = function (e) {
         if (e.type === "destroy" && e.object.activity === _this.object.activity) _this.destroy();
       };
@@ -442,7 +532,11 @@
     }
 
     BgTrailer.prototype.same = function () {
-      try { return Lampa.Activity.active().activity === this.object.activity; } catch (e) { return false; }
+      try {
+        return Lampa.Activity.active().activity === this.object.activity;
+      } catch (e) {
+        return false;
+      }
     };
 
     BgTrailer.prototype.isTopView = function () {
@@ -463,8 +557,14 @@
     };
 
     BgTrailer.prototype.update = function () {
-      if (!this.same()) { this.player.pause(); return; }
-      if (!this.isTopView()) { this.player.pause(); return; }
+      if (!this.same()) {
+        this.player.pause();
+        return;
+      }
+      if (!this.isTopView()) {
+        this.player.pause();
+        return;
+      }
       this.player.play();
     };
 
@@ -472,13 +572,14 @@
       var _this = this;
 
       clearInterval(this.timerCheck);
-      this.timerCheck = setInterval(function () { _this.update(); }, 250);
+      this.timerCheck = setInterval(function () {
+        _this.update();
+      }, 250);
 
       clearTimeout(this.timerLoad);
       this.timerLoad = setTimeout(function () {
         if (_this.same() && _this.isTopView()) {
           _this.player.play();
-
           if (!_this.firstlauch) {
             _this.firstlauch = true;
             _this.timelauch = 5000;
@@ -491,10 +592,16 @@
       clearTimeout(this.timerLoad);
       clearInterval(this.timerCheck);
 
-      try { Lampa.Controller.listener.remove("toggle", this.onToggle); } catch (e) {}
-      try { Lampa.Listener.remove("activity", this.onActivity); } catch (e2) {}
+      try {
+        Lampa.Controller.listener.remove("toggle", this.onToggle);
+      } catch (e) {}
+      try {
+        Lampa.Listener.remove("activity", this.onActivity);
+      } catch (e2) {}
 
-      try { this.player.destroy(); } catch (e3) {}
+      try {
+        this.player.destroy();
+      } catch (e3) {}
     };
 
     function hookFullAutoTrailer() {
@@ -504,93 +611,58 @@
         if (!e) return;
         if (!(e.type === "complite" || e.type === "complete")) return;
 
-        // настройка в Style Interface
-        if (!Lampa.Storage.get("cardify_run_trailers", true)) return;
+        // КРИТИЧНО: при входе в full глушим каталожный звук
+        stopCatalogAudioEverywhere({ destroy: false });
 
+        if (!Lampa.Storage.get("cardify_run_trailers", true)) return;
         if (!e.object || !e.object.activity) return;
         if (e.object.activity.trailer_ready) return;
 
-        // совместимость как в Cardify
         try {
           if (Lampa.Manifest && Lampa.Manifest.app_digital && Lampa.Manifest.app_digital < 220) return;
         } catch (err) {}
 
-        // добавим класс background как в оригинале cardify
-        try { e.object.activity.render().find(".full-start__background").addClass("cardify__background"); } catch (err2) {}
+        try {
+          e.object.activity.render().find(".full-start__background").addClass("cardify__background");
+        } catch (err2) {}
 
-        // 1) если videos уже есть — берём сразу
         var trailer = null;
         try {
           trailer = pickTrailerFromDetails(e.data);
         } catch (ex) {}
 
-        // 2) если нет — подгружаем videos
+        function run(tr) {
+          if (!tr) return;
+          try {
+            if (Lampa.Activity.active().activity === e.object.activity) {
+              new BgTrailer(e.object, tr, { sound: Lampa.Storage.get("cardify_trailer_sound", true) !== false });
+            } else {
+              var follow = function (a) {
+                if (a.type === "start" && a.object.activity === e.object.activity && !e.object.activity.trailer_ready) {
+                  Lampa.Listener.remove("activity", follow);
+                  new BgTrailer(e.object, tr, { sound: Lampa.Storage.get("cardify_trailer_sound", true) !== false });
+                }
+              };
+              Lampa.Listener.follow("activity", follow);
+            }
+          } catch (e3) {}
+        }
+
         if (!trailer) {
           ensureDetails(e.data, "videos", function (details) {
-            if (!details) return;
             var tr = pickTrailerFromDetails(details);
-            if (!tr) return;
-
-            // если карточка активна — стартуем
-            try {
-              if (Lampa.Activity.active().activity === e.object.activity) {
-                new BgTrailer(e.object, tr, { sound: Lampa.Storage.get("cardify_trailer_sound", true) !== false });
-              } else {
-                var follow = function (a) {
-                  if (a.type === "start" && a.object.activity === e.object.activity && !e.object.activity.trailer_ready) {
-                    Lampa.Listener.remove("activity", follow);
-                    new BgTrailer(e.object, tr, { sound: Lampa.Storage.get("cardify_trailer_sound", true) !== false });
-                  }
-                };
-                Lampa.Listener.follow("activity", follow);
-              }
-            } catch (e3) {}
+            run(tr);
           });
           return;
         }
 
-        // есть trailer сразу
-        try {
-          if (Lampa.Activity.active().activity === e.object.activity) {
-            new BgTrailer(e.object, trailer, { sound: Lampa.Storage.get("cardify_trailer_sound", true) !== false });
-          } else {
-            var follow2 = function (a) {
-              if (a.type === "start" && a.object.activity === e.object.activity && !e.object.activity.trailer_ready) {
-                Lampa.Listener.remove("activity", follow2);
-                new BgTrailer(e.object, trailer, { sound: Lampa.Storage.get("cardify_trailer_sound", true) !== false });
-              }
-            };
-            Lampa.Listener.follow("activity", follow2);
-          }
-        } catch (e4) {}
+        run(trailer);
       });
     }
 
     // -----------------------------
-    // 2) STYLE INTERFACE: твой плагин + каталожный трейлер-фон
+    // 3) New Interface styles + catalog trailer layers
     // -----------------------------
-
-    // ВАЖНО: НЕ ломаем чужие плагины — не используем старые window.plugin_interface_ready_v3 флаги
-    // (но если у тебя старый плагин ещё включён — будет конфликт, поэтому выключи старые).
-
-    function shouldEnableInterface(object) {
-      if (!object) return false;
-      if (window.innerWidth < 767) return false;
-      if (Lampa.Platform.screen("mobile")) return false;
-      if (object.title === "Избранное") return false;
-      return true;
-    }
-
-    function wrapMethod(object, methodName, wrapper) {
-      if (!object) return;
-      var originalMethod = typeof object[methodName] === "function" ? object[methodName] : null;
-      object[methodName] = function () {
-        var args = Array.prototype.slice.call(arguments);
-        return wrapper.call(this, originalMethod, args);
-      };
-    }
-
-    // ----- Стили нового интерфейса (твои) + фикс слоёв под трейлер
     function addStylesNewInterface() {
       if (addStylesNewInterface.added) return;
       addStylesNewInterface.added = true;
@@ -600,7 +672,6 @@
       Lampa.Template.add("new_interface_style_final", styles);
       $("body").append(Lampa.Template.get("new_interface_style_final", {}, true));
 
-      // ФИКС СЛОЁВ: фон-постеры ниже, трейлер выше постеров, UI выше всего
       addOnceStyle(
         "new_interface_trailer_layers_css",
         ".new-interface{position:relative;z-index:0}" +
@@ -609,7 +680,7 @@
           ".new-interface .new-interface-trailer.display{opacity:1}" +
           ".new-interface .new-interface-trailer iframe{border:0;width:100%;flex-shrink:0}" +
           ".new-interface .full-start__background{transition:opacity .2s}" +
-          ".new-interface.trailer-on .full-start__background{opacity:0!important}"
+          ".new-interface.trailer-on .full-start__background{opacity:0!important}",
       );
     }
 
@@ -687,7 +758,9 @@
       </style>`;
     }
 
-    // ----- Каталожный трейлер-фон
+    // -----------------------------
+    // 4) Catalog trailer controller
+    // -----------------------------
     function CatalogTrailer(state) {
       this.state = state;
       this.wrapper = null;
@@ -697,14 +770,20 @@
       this.currentVideo = "";
       this.token = 0;
       this.timer = null;
-      this.enabled = function () {
-        return Lampa.Storage.get("catalog_run_trailers", true) !== false;
-      };
-      this.sound = function () {
-        // в каталоге по умолчанию без звука
-        return Lampa.Storage.get("catalog_trailer_sound", false) === true;
-      };
+
+      // register globally for stopAll
+      try {
+        window.__final_catalog_trailers.push(this);
+      } catch (e) {}
     }
+
+    CatalogTrailer.prototype.enabled = function () {
+      return Lampa.Storage.get("catalog_run_trailers", true) !== false;
+    };
+
+    CatalogTrailer.prototype.sound = function () {
+      return Lampa.Storage.get("catalog_trailer_sound", false) === true;
+    };
 
     CatalogTrailer.prototype.attach = function (container) {
       if (this.wrapper) return;
@@ -715,14 +794,21 @@
       this.host = document.createElement("div");
       this.wrapper.appendChild(this.host);
 
-      // вставляем сразу после background-wrapper (важно для слоёв)
-      container.insertBefore(this.wrapper, container.firstChild ? container.firstChild.nextSibling : null);
+      // вставляем сразу после background-wrapper если есть
+      var bgw = container.querySelector(".full-start__background-wrapper");
+      if (bgw && bgw.parentNode === container) {
+        if (bgw.nextSibling) container.insertBefore(this.wrapper, bgw.nextSibling);
+        else container.appendChild(this.wrapper);
+      } else {
+        container.insertBefore(this.wrapper, container.firstChild || null);
+      }
     };
 
     CatalogTrailer.prototype._setUiState = function (playing) {
       try {
         var c = this.state.main.render(true);
         if (!c) return;
+
         if (playing) c.classList.add("trailer-on");
         else c.classList.remove("trailer-on");
 
@@ -738,19 +824,37 @@
       this.token++;
       this._setUiState(false);
 
-      try { if (this.player && this.loaded) this.player.pauseVideo(); } catch (e) {}
+      try {
+        if (this.player && this.loaded) {
+          this.player.pauseVideo();
+          this.player.stopVideo();
+          this.player.mute();
+        }
+      } catch (e) {}
     };
 
     CatalogTrailer.prototype.destroy = function () {
       clearTimeout(this.timer);
       this.token++;
 
-      try { if (this.player && this.player.destroy) this.player.destroy(); } catch (e) {}
+      try {
+        if (this.player) {
+          try {
+            this.player.stopVideo();
+            this.player.mute();
+          } catch (e0) {}
+          if (this.player.destroy) this.player.destroy();
+        }
+      } catch (e) {}
+
       this.player = null;
       this.loaded = false;
       this.currentVideo = "";
 
-      try { if (this.wrapper && this.wrapper.parentNode) this.wrapper.parentNode.removeChild(this.wrapper); } catch (e2) {}
+      try {
+        if (this.wrapper && this.wrapper.parentNode) this.wrapper.parentNode.removeChild(this.wrapper);
+      } catch (e2) {}
+
       this.wrapper = null;
       this.host = null;
     };
@@ -760,15 +864,23 @@
       if (!this.enabled()) return this.stop();
       if (!cardData || !cardData.id) return this.stop();
 
+      // если поверх открылся другой слой (настройки, full и т.д.) — не играем
+      try {
+        var ctrl = Lampa.Controller.enabled();
+        if (ctrl && ctrl.name && ctrl.name !== "main") {
+          return this.stop();
+        }
+      } catch (e0) {}
+
       var myToken = ++this.token;
       clearTimeout(this.timer);
 
-      // небольшая задержка, чтобы не дергать при быстрых скроллах
       this.timer = setTimeout(function () {
         if (self.token !== myToken) return;
 
         ensureDetails(cardData, "videos", function (details) {
           if (self.token !== myToken) return;
+
           var trailer = pickTrailerFromDetails(details);
           if (!trailer) return self.stop();
 
@@ -778,13 +890,16 @@
             function applySound() {
               try {
                 if (!self.player) return;
-                if (self.sound()) self.player.unMute();
-                else self.player.mute();
+                // для автоплея надёжнее стартовать muted и потом (если надо) unmute
+                self.player.mute();
+                if (self.sound()) {
+                  // если ТВ/вебвью разрешает — включим
+                  self.player.unMute();
+                }
               } catch (e) {}
             }
 
             if (!self.player) {
-              // создаём
               self.player = new YT.Player(self.host, {
                 height: window.innerHeight * 2,
                 width: window.innerWidth,
@@ -798,20 +913,30 @@
                   playsinline: 1,
                   rel: 0,
                   iv_load_policy: 3,
+                  enablejsapi: 1,
                 },
                 events: {
                   onReady: function () {
                     self.loaded = true;
                     self.currentVideo = trailer.id;
+
                     applySound();
-                    try { self.player.setPlaybackQuality("hd1080"); } catch (e) {}
-                    try { self.player.playVideo(); } catch (e2) {}
+                    try {
+                      self.player.setPlaybackQuality("hd1080");
+                    } catch (e) {}
+
+                    try {
+                      self.player.playVideo();
+                    } catch (e2) {}
                   },
                   onStateChange: function (st) {
                     if (st.data === YT.PlayerState.PLAYING) self._setUiState(true);
                     if (st.data === YT.PlayerState.PAUSED) self._setUiState(false);
                     if (st.data === YT.PlayerState.ENDED) {
-                      try { self.player.seekTo(0, true); self.player.playVideo(); } catch (e3) {}
+                      try {
+                        self.player.seekTo(0, true);
+                        self.player.playVideo();
+                      } catch (e3) {}
                     }
                   },
                   onError: function () {
@@ -822,26 +947,34 @@
               return;
             }
 
-            // уже есть player
             applySound();
+
             if (self.currentVideo !== trailer.id) {
               self.currentVideo = trailer.id;
-              try { self.player.loadVideoById(trailer.id); } catch (e4) {
-                // fallback: пересоздать
-                try { self.player.destroy(); } catch (e5) {}
+              try {
+                self.player.loadVideoById(trailer.id);
+              } catch (e4) {
+                try {
+                  self.player.destroy();
+                } catch (e5) {}
                 self.player = null;
                 self.loaded = false;
                 self.playFor(cardData);
                 return;
               }
             }
-            try { self.player.playVideo(); } catch (e6) {}
+
+            try {
+              self.player.playVideo();
+            } catch (e6) {}
           });
         });
       }, 900);
     };
 
-    // ----- Инфопанель (твой код, чуть укорочен: логика прежняя)
+    // -----------------------------
+    // 5) InfoPanel (каталог) + showLogo (полностью, как у тебя)
+    // -----------------------------
     function InfoPanel() {
       this.html = null;
       this.timer = null;
@@ -849,6 +982,7 @@
       this.network = new Lampa.Reguest();
       this.loaded = globalInfoCache;
       this.currentUrl = null;
+      this.lastRenderId = 0;
     }
 
     InfoPanel.prototype.create = function () {
@@ -884,256 +1018,248 @@
 
       clearTimeout(this.fadeTimer);
 
-      // оставляем как было
-      try { Lampa.Background.change(Lampa.Api.img(data.backdrop_path, "original")); } catch (e) {}
+      try {
+        Lampa.Background.change(Lampa.Api.img(data.backdrop_path, "original"));
+      } catch (e) {}
 
       this.load(data);
 
-      title.text(data.title || data.name || "");
-      title.css({ opacity: 1 });
-
-      // логотип анимации (как у тебя) — оставляем включаемым
       if (Lampa.Storage.get("logo_show", true)) {
-        try { this.showLogo(data, currentRenderId); } catch (e2) {}
+        title.text(data.title || data.name || "");
+        title.css({ opacity: 1 });
+        this.showLogo(data, currentRenderId);
+      } else {
+        title.text(data.title || data.name || "");
+        title.css({ opacity: 1 });
       }
     };
 
-    // showLogo — оставляем твою реализацию полностью (коротко: вставь сюда свой блок showLogo без изменений)
-    // Чтобы ответ не раздувать ещё больше — я оставил "как есть" у тебя.
-    // ВАЖНО: если хочешь, я могу вернуть showLogo целиком здесь же, но он у тебя уже рабочий.
+    // FULL showLogo block (из твоего оригинала)
     InfoPanel.prototype.showLogo = function (data, renderId) {
-  var _this = this;
+      var _this = this;
 
-  var FADE_OUT_TEXT = 300;
-  var MORPH_HEIGHT = 400;
-  var FADE_IN_IMG = 400;
-  var TARGET_WIDTH = "7em";
-  var PADDING_TOP_EM = 0;
-  var PADDING_BOTTOM_EM = 0.2;
+      var FADE_OUT_TEXT = 300;
+      var MORPH_HEIGHT = 400;
+      var FADE_IN_IMG = 400;
+      var TARGET_WIDTH = "7em";
+      var PADDING_TOP_EM = 0;
+      var PADDING_BOTTOM_EM = 0.2;
 
-  var title_elem = this.html.find(".new-interface-info__title");
-  var head_elem = this.html.find(".new-interface-info__head");
-  var details_elem = this.html.find(".new-interface-info__details");
-  var dom_title = title_elem[0];
+      var title_elem = this.html.find(".new-interface-info__title");
+      var head_elem = this.html.find(".new-interface-info__head");
+      var details_elem = this.html.find(".new-interface-info__details");
+      var dom_title = title_elem[0];
 
-  function applyFinalStyles(img, text_height) {
-    img.style.marginTop = "0";
-    img.style.marginLeft = "0";
-    img.style.paddingTop = PADDING_TOP_EM + "em";
-    img.style.paddingBottom = PADDING_BOTTOM_EM + "em";
+      function applyFinalStyles(img, text_height) {
+        img.style.marginTop = "0";
+        img.style.marginLeft = "0";
+        img.style.paddingTop = PADDING_TOP_EM + "em";
+        img.style.paddingBottom = PADDING_BOTTOM_EM + "em";
 
-    img.style.imageRendering = "-webkit-optimize-contrast";
+        img.style.imageRendering = "-webkit-optimize-contrast";
 
-    if (text_height) {
-      img.style.height = text_height + "px";
-      img.style.width = "auto";
-      img.style.maxWidth = "100%";
-      img.style.maxHeight = "none";
-    } else if (window.innerWidth < 768) {
-      img.style.width = "100%";
-      img.style.height = "auto";
-      img.style.maxWidth = "100%";
-      img.style.maxHeight = "none";
-    } else {
-      img.style.width = TARGET_WIDTH;
-      img.style.height = "auto";
-      img.style.maxHeight = "none";
-      img.style.maxWidth = "100%";
-    }
+        if (text_height) {
+          img.style.height = text_height + "px";
+          img.style.width = "auto";
+          img.style.maxWidth = "100%";
+          img.style.maxHeight = "none";
+        } else if (window.innerWidth < 768) {
+          img.style.width = "100%";
+          img.style.height = "auto";
+          img.style.maxWidth = "100%";
+          img.style.maxHeight = "none";
+        } else {
+          img.style.width = TARGET_WIDTH;
+          img.style.height = "auto";
+          img.style.maxHeight = "none";
+          img.style.maxWidth = "100%";
+        }
 
-    img.style.boxSizing = "border-box";
-    img.style.display = "block";
-    img.style.objectFit = "contain";
-    img.style.objectPosition = "left bottom";
-    img.style.transition = "none";
-  }
-
-  function moveHeadToDetails(animate) {
-    if (!head_elem.length || !details_elem.length) return;
-    if (details_elem.find(".logo-moved-head").length > 0) return;
-
-    var content = head_elem.html();
-    if (!content || content.trim() === "") return;
-
-    var new_item = $('<span class="logo-moved-head">' + content + "</span>");
-    var separator = $('<span class="new-interface-info__split logo-moved-separator">●</span>');
-
-    if (animate) {
-      new_item.css({ opacity: 0, transition: "none" });
-      separator.css({ opacity: 0, transition: "none" });
-    }
-
-    if (details_elem.children().length > 0) details_elem.append(separator);
-    details_elem.append(new_item);
-
-    if (animate) {
-      head_elem.css({
-        transition: "opacity " + FADE_OUT_TEXT / 1000 + "s ease",
-        opacity: "0",
-      });
-
-      setTimeout(function () {
-        new_item.css({ transition: "opacity " + FADE_IN_IMG / 1000 + "s ease", opacity: "1" });
-        separator.css({ transition: "opacity " + FADE_IN_IMG / 1000 + "s ease", opacity: "1" });
-      }, FADE_OUT_TEXT);
-    } else {
-      head_elem.css({ opacity: "0", transition: "none" });
-    }
-  }
-
-  function startLogoAnimation(img_url, fromCache) {
-    if (renderId && renderId !== _this.lastRenderId) return;
-
-    var img = new Image();
-    img.src = img_url;
-
-    var start_text_height = 0;
-    if (dom_title) start_text_height = dom_title.getBoundingClientRect().height;
-
-    if (fromCache) {
-      if (dom_title) start_text_height = dom_title.getBoundingClientRect().height;
-
-      moveHeadToDetails(false);
-      applyFinalStyles(img, start_text_height);
-
-      title_elem.empty().append(img);
-      title_elem.css({ opacity: "1", transition: "none" });
-
-      if (dom_title) {
-        dom_title.style.display = "block";
-        dom_title.style.height = "";
-        dom_title.style.transition = "none";
+        img.style.boxSizing = "border-box";
+        img.style.display = "block";
+        img.style.objectFit = "contain";
+        img.style.objectPosition = "left bottom";
+        img.style.transition = "none";
       }
-      img.style.opacity = "1";
-      return;
-    }
 
-    applyFinalStyles(img, start_text_height);
-    img.style.opacity = "0";
+      function moveHeadToDetails(animate) {
+        if (!head_elem.length || !details_elem.length) return;
+        if (details_elem.find(".logo-moved-head").length > 0) return;
 
-    img.onload = function () {
-      if (renderId && renderId !== _this.lastRenderId) return;
+        var content = head_elem.html();
+        if (!content || content.trim() === "") return;
 
-      setTimeout(function () {
+        var new_item = $('<span class="logo-moved-head">' + content + "</span>");
+        var separator = $('<span class="new-interface-info__split logo-moved-separator">●</span>');
+
+        if (animate) {
+          new_item.css({ opacity: 0, transition: "none" });
+          separator.css({ opacity: 0, transition: "none" });
+        }
+
+        if (details_elem.children().length > 0) details_elem.append(separator);
+        details_elem.append(new_item);
+
+        if (animate) {
+          head_elem.css({
+            transition: "opacity " + FADE_OUT_TEXT / 1000 + "s ease",
+            opacity: "0",
+          });
+
+          setTimeout(function () {
+            new_item.css({ transition: "opacity " + FADE_IN_IMG / 1000 + "s ease", opacity: "1" });
+            separator.css({ transition: "opacity " + FADE_IN_IMG / 1000 + "s ease", opacity: "1" });
+          }, FADE_OUT_TEXT);
+        } else {
+          head_elem.css({ opacity: "0", transition: "none" });
+        }
+      }
+
+      function startLogoAnimation(img_url, fromCache) {
         if (renderId && renderId !== _this.lastRenderId) return;
 
+        var img = new Image();
+        img.src = img_url;
+
+        var start_text_height = 0;
         if (dom_title) start_text_height = dom_title.getBoundingClientRect().height;
 
-        moveHeadToDetails(true);
+        if (fromCache) {
+          if (dom_title) start_text_height = dom_title.getBoundingClientRect().height;
 
-        title_elem.css({
-          transition: "opacity " + FADE_OUT_TEXT / 1000 + "s ease",
-          opacity: "0",
-        });
+          moveHeadToDetails(false);
+          applyFinalStyles(img, start_text_height);
 
-        setTimeout(function () {
-          if (renderId && renderId !== _this.lastRenderId) return;
-
-          title_elem.empty();
-          title_elem.append(img);
+          title_elem.empty().append(img);
           title_elem.css({ opacity: "1", transition: "none" });
 
-          var target_container_height = dom_title.getBoundingClientRect().height;
+          if (dom_title) {
+            dom_title.style.display = "block";
+            dom_title.style.height = "";
+            dom_title.style.transition = "none";
+          }
+          img.style.opacity = "1";
+          return;
+        }
 
-          dom_title.style.height = start_text_height + "px";
-          dom_title.style.display = "block";
-          dom_title.style.overflow = "hidden";
-          dom_title.style.boxSizing = "border-box";
+        applyFinalStyles(img, start_text_height);
+        img.style.opacity = "0";
 
-          void dom_title.offsetHeight;
+        img.onload = function () {
+          if (renderId && renderId !== _this.lastRenderId) return;
 
-          dom_title.style.transition =
-            "height " + MORPH_HEIGHT / 1000 + "s cubic-bezier(0.4, 0, 0.2, 1)";
-
-          requestAnimationFrame(function () {
+          setTimeout(function () {
             if (renderId && renderId !== _this.lastRenderId) return;
-            dom_title.style.height = target_container_height + "px";
+
+            if (dom_title) start_text_height = dom_title.getBoundingClientRect().height;
+
+            moveHeadToDetails(true);
+
+            title_elem.css({
+              transition: "opacity " + FADE_OUT_TEXT / 1000 + "s ease",
+              opacity: "0",
+            });
 
             setTimeout(function () {
               if (renderId && renderId !== _this.lastRenderId) return;
-              img.style.transition = "opacity " + FADE_IN_IMG / 1000 + "s ease";
-              img.style.opacity = "1";
-            }, Math.max(0, MORPH_HEIGHT - 100));
 
-            setTimeout(function () {
-              if (renderId && renderId !== _this.lastRenderId) return;
-              applyFinalStyles(img, start_text_height);
-              dom_title.style.height = "";
-            }, MORPH_HEIGHT + FADE_IN_IMG + 50);
-          });
-        }, FADE_OUT_TEXT);
-      }, 200);
-    };
+              title_elem.empty();
+              title_elem.append(img);
+              title_elem.css({ opacity: "1", transition: "none" });
 
-    img.onerror = function () {
-      title_elem.css({ opacity: "1", transition: "none" });
-    };
-  }
+              var target_container_height = dom_title.getBoundingClientRect().height;
 
-  if (data.id) {
-    var type = data.name ? "tv" : "movie";
-    var language = Lampa.Storage.get("language");
-    var cache_key = "logo_cache_v2_" + type + "_" + data.id + "_" + language;
-    var cached_url = Lampa.Storage.get(cache_key);
+              dom_title.style.height = start_text_height + "px";
+              dom_title.style.display = "block";
+              dom_title.style.overflow = "hidden";
+              dom_title.style.boxSizing = "border-box";
 
-    if (cached_url && cached_url !== "none") {
-      var img_cache = new Image();
-      img_cache.src = cached_url;
+              void dom_title.offsetHeight;
 
-      if (img_cache.complete || Lampa.Storage.get("async_load", true)) {
-        startLogoAnimation(cached_url, true);
-      } else {
-        startLogoAnimation(cached_url, false);
+              dom_title.style.transition = "height " + MORPH_HEIGHT / 1000 + "s cubic-bezier(0.4, 0, 0.2, 1)";
+
+              requestAnimationFrame(function () {
+                if (renderId && renderId !== _this.lastRenderId) return;
+                dom_title.style.height = target_container_height + "px";
+
+                setTimeout(function () {
+                  if (renderId && renderId !== _this.lastRenderId) return;
+                  img.style.transition = "opacity " + FADE_IN_IMG / 1000 + "s ease";
+                  img.style.opacity = "1";
+                }, Math.max(0, MORPH_HEIGHT - 100));
+
+                setTimeout(function () {
+                  if (renderId && renderId !== _this.lastRenderId) return;
+                  applyFinalStyles(img, start_text_height);
+                  dom_title.style.height = "";
+                }, MORPH_HEIGHT + FADE_IN_IMG + 50);
+              });
+            }, FADE_OUT_TEXT);
+          }, 200);
+        };
+
+        img.onerror = function () {
+          title_elem.css({ opacity: "1", transition: "none" });
+        };
       }
-    } else {
-      var url =
-        Lampa.TMDB.api(
-          type +
-            "/" +
-            data.id +
-            "/images?api_key=" +
-            Lampa.TMDB.key() +
-            "&include_image_language=" +
-            language +
-            ",en,null",
-        );
 
-      $.get(url, function (data_api) {
-        if (renderId && renderId !== _this.lastRenderId) return;
+      if (data.id) {
+        var type = data.name ? "tv" : "movie";
+        var language = Lampa.Storage.get("language");
+        var cache_key = "logo_cache_v2_" + type + "_" + data.id + "_" + language;
+        var cached_url = Lampa.Storage.get(cache_key);
 
-        var final_logo = null;
-        if (data_api.logos && data_api.logos.length > 0) {
-          for (var i = 0; i < data_api.logos.length; i++) {
-            if (data_api.logos[i].iso_639_1 == language) {
-              final_logo = data_api.logos[i].file_path;
-              break;
-            }
-          }
-          if (!final_logo) {
-            for (var j = 0; j < data_api.logos.length; j++) {
-              if (data_api.logos[j].iso_639_1 == "en") {
-                final_logo = data_api.logos[j].file_path;
-                break;
-              }
-            }
-          }
-          if (!final_logo) final_logo = data_api.logos[0].file_path;
-        }
+        if (cached_url && cached_url !== "none") {
+          var img_cache = new Image();
+          img_cache.src = cached_url;
 
-        if (final_logo) {
-          var img_url = Lampa.TMDB.image(
-            "/t/p/original" + final_logo.replace(".svg", ".png"),
-          );
-          Lampa.Storage.set(cache_key, img_url);
-          startLogoAnimation(img_url, false);
+          if (img_cache.complete || Lampa.Storage.get("async_load", true)) startLogoAnimation(cached_url, true);
+          else startLogoAnimation(cached_url, false);
         } else {
-          Lampa.Storage.set(cache_key, "none");
-        }
-      }).fail(function () {});
-    }
-  }
-};
+          var url = Lampa.TMDB.api(
+            type +
+              "/" +
+              data.id +
+              "/images?api_key=" +
+              Lampa.TMDB.key() +
+              "&include_image_language=" +
+              language +
+              ",en,null",
+          );
 
+          $.get(url, function (data_api) {
+            if (renderId && renderId !== _this.lastRenderId) return;
+
+            var final_logo = null;
+            if (data_api.logos && data_api.logos.length > 0) {
+              for (var i = 0; i < data_api.logos.length; i++) {
+                if (data_api.logos[i].iso_639_1 == language) {
+                  final_logo = data_api.logos[i].file_path;
+                  break;
+                }
+              }
+              if (!final_logo) {
+                for (var j = 0; j < data_api.logos.length; j++) {
+                  if (data_api.logos[j].iso_639_1 == "en") {
+                    final_logo = data_api.logos[j].file_path;
+                    break;
+                  }
+                }
+              }
+              if (!final_logo) final_logo = data_api.logos[0].file_path;
+            }
+
+            if (final_logo) {
+              var img_url = Lampa.TMDB.image("/t/p/original" + final_logo.replace(".svg", ".png"));
+              Lampa.Storage.set(cache_key, img_url);
+              startLogoAnimation(img_url, false);
+            } else {
+              Lampa.Storage.set(cache_key, "none");
+            }
+          }).fail(function () {});
+        }
+      }
+    };
 
     InfoPanel.prototype.load = function (data) {
       if (!data || !data.id) return;
@@ -1141,7 +1267,7 @@
       var source = data.source || "tmdb";
       if (source !== "tmdb" && source !== "cub") return;
 
-      // ДОБАВИЛ videos в append, чтобы и инфопанель и трейлеры питались одним запросом
+      // общий url с videos — чтобы и инфо и трейлеры ели один кеш
       var apiUrl = buildTmdbDetailUrl(data, "content_ratings,release_dates,videos");
       if (!apiUrl) return;
 
@@ -1165,7 +1291,6 @@
       }, 300);
     };
 
-    // draw — оставляем твою реализацию без изменений по смыслу (цветные рейтинги/жанры/статус)
     InfoPanel.prototype.draw = function (data) {
       if (!data || !this.html) return;
 
@@ -1178,11 +1303,15 @@
       var detailsInfo = [];
 
       var countries = [];
-      try { countries = Lampa.Api.sources.tmdb.parseCountries(data) || []; } catch (e) {}
+      try {
+        countries = Lampa.Api.sources.tmdb.parseCountries(data) || [];
+      } catch (e) {}
       if (countries.length > 2) countries = countries.slice(0, 2);
 
       var ageRating = "";
-      try { ageRating = Lampa.Api.sources.tmdb.parsePG(data) || ""; } catch (e2) {}
+      try {
+        ageRating = Lampa.Api.sources.tmdb.parsePG(data) || "";
+      } catch (e2) {}
 
       if (Lampa.Storage.get("rat") !== false) {
         if (rating > 0) {
@@ -1204,7 +1333,12 @@
       if (Lampa.Storage.get("ganr") !== false) {
         if (data.genres && data.genres.length > 0) {
           detailsInfo.push(
-            data.genres.slice(0, 2).map(function (g) { return Lampa.Utils.capitalizeFirstLetter(g.name); }).join(" | "),
+            data.genres
+              .slice(0, 2)
+              .map(function (g) {
+                return Lampa.Utils.capitalizeFirstLetter(g.name);
+              })
+              .join(" | "),
           );
         }
       }
@@ -1256,13 +1390,16 @@
       clearTimeout(this.timer);
       this.network.clear();
       this.currentUrl = null;
+
       if (this.html) {
         this.html.remove();
         this.html = null;
       }
     };
 
-    // ----- background + state
+    // -----------------------------
+    // 6) State for Main (new interface)
+    // -----------------------------
     function createState(mainInstance) {
       var infoPanel = new InfoPanel();
       infoPanel.create();
@@ -1278,8 +1415,6 @@
       backgroundWrapper.appendChild(bg1);
       backgroundWrapper.appendChild(bg2);
 
-      var catalogTrailer = new CatalogTrailer({ main: mainInstance });
-
       var state = {
         main: mainInstance,
         info: infoPanel,
@@ -1288,6 +1423,7 @@
         backgroundTimer: null,
         backgroundLast: "",
         attached: false,
+        catalogTrailer: null,
 
         attach: function () {
           if (this.attached) return;
@@ -1301,8 +1437,9 @@
             container.insertBefore(backgroundWrapper, container.firstChild || null);
           }
 
-          // трейлер-слой (вставляем после фона)
-          catalogTrailer.attach(container);
+          // каталожный трейлер
+          if (!this.catalogTrailer) this.catalogTrailer = new CatalogTrailer(this);
+          this.catalogTrailer.attach(container);
 
           var infoElement = infoPanel.render(true);
           this.infoElement = infoElement;
@@ -1318,14 +1455,14 @@
 
         update: function (data) {
           if (!data) return;
+
           infoPanel.update(data);
           this.updateBackground(data);
 
           // каталожный трейлер
-          if (Lampa.Storage.get("catalog_run_trailers", true) !== false) {
-            catalogTrailer.playFor(data);
-          } else {
-            catalogTrailer.stop();
+          if (this.catalogTrailer) {
+            if (Lampa.Storage.get("catalog_run_trailers", true) !== false) this.catalogTrailer.playFor(data);
+            else this.catalogTrailer.stop();
           }
         },
 
@@ -1372,13 +1509,19 @@
 
         reset: function () {
           infoPanel.empty();
-          catalogTrailer.stop();
+          if (this.catalogTrailer) this.catalogTrailer.stop();
         },
 
         destroy: function () {
           clearTimeout(this.backgroundTimer);
           infoPanel.destroy();
-          catalogTrailer.destroy();
+
+          if (this.catalogTrailer) {
+            try {
+              this.catalogTrailer.destroy();
+            } catch (e) {}
+            this.catalogTrailer = null;
+          }
 
           var container = mainInstance.render(true);
           if (container) {
@@ -1392,9 +1535,6 @@
           this.attached = false;
         },
       };
-
-      // прокинем state в catalogTrailer
-      catalogTrailer.state = state;
 
       return state;
     }
@@ -1436,17 +1576,30 @@
         if (element) {
           var node = element.jquery ? element[0] : element;
           if (node && node.classList) {
-            if (targetStyle === "wide") { node.classList.add("card--wide"); node.classList.remove("card--small"); }
-            else { node.classList.add("card--small"); node.classList.remove("card--wide"); }
+            if (targetStyle === "wide") {
+              node.classList.add("card--wide");
+              node.classList.remove("card--small");
+            } else {
+              node.classList.add("card--small");
+              node.classList.remove("card--wide");
+            }
           }
         }
       }
 
       card.use({
-        onFocus: function () { state.update(card.data); },
-        onHover: function () { state.update(card.data); },
-        onTouch: function () { state.update(card.data); },
-        onDestroy: function () { delete card.__newInterfaceCard; },
+        onFocus: function () {
+          state.update(card.data);
+        },
+        onHover: function () {
+          state.update(card.data);
+        },
+        onTouch: function () {
+          state.update(card.data);
+        },
+        onDestroy: function () {
+          delete card.__newInterfaceCard;
+        },
       });
     }
 
@@ -1459,6 +1612,7 @@
 
     function findCardData(element) {
       if (!element) return null;
+
       var node = element && element.jquery ? element[0] : element;
       while (node && !node.card_data) node = node.parentNode;
       return node && node.card_data ? node.card_data : null;
@@ -1467,6 +1621,7 @@
     function getFocusedCard(items) {
       var container = items && typeof items.render === "function" ? items.render(true) : null;
       if (!container || !container.querySelector) return null;
+
       var focusedElement = container.querySelector(".selector.focus") || container.querySelector(".focus");
       return findCardData(focusedElement);
     }
@@ -1484,10 +1639,14 @@
         if (line.params.items) line.params.items.view = 12;
       }
 
-      var processCard = function (card) { handleCard(state, card); };
+      var processCard = function (card) {
+        handleCard(state, card);
+      };
 
       line.use({
-        onInstance: function (instance) { processCard(instance); },
+        onInstance: function (instance) {
+          processCard(instance);
+        },
         onActive: function (card, results) {
           var cd = getCardData(card, results);
           if (cd) state.update(cd);
@@ -1498,7 +1657,9 @@
             if (focused) state.update(focused);
           }, 32);
         },
-        onMore: function () { state.reset(); },
+        onMore: function () {
+          state.reset();
+        },
         onDestroy: function () {
           state.reset();
           delete line.__newInterfaceLine;
@@ -1506,6 +1667,7 @@
       });
 
       if (Array.isArray(line.items) && line.items.length) line.items.forEach(processCard);
+
       if (line.last) {
         var lastCardData = findCardData(line.last);
         if (lastCardData) state.update(lastCardData);
@@ -1513,7 +1675,7 @@
     }
 
     // -----------------------------
-    // Vote colors (как у тебя) — оставляем в упрощённом виде
+    // 7) Vote colors observer (минимально)
     // -----------------------------
     function getColorByRating(vote) {
       if (isNaN(vote)) return "";
@@ -1528,6 +1690,7 @@
     function applyColorByRating(element) {
       var $el = $(element);
       var voteText = $el.text().trim();
+
       if (/^\d+(\.\d+)?K$/.test(voteText)) return;
 
       var match = voteText.match(/(\d+(\.\d+)?)/);
@@ -1562,10 +1725,18 @@
     function updateVoteColors() {
       if (!Lampa.Storage.get("colored_ratings", true)) return;
 
-      $(".card__vote").each(function () { applyColorByRating(this); });
-      $(".full-start__rate, .full-start-new__rate").each(function () { applyColorByRating(this); });
-      $(".info__rate, .card__imdb-rate, .card__kinopoisk-rate").each(function () { applyColorByRating(this); });
-      $(".rate--kp, .rate--imdb, .rate--cub").each(function () { applyColorByRating($(this).find("> div").eq(0)); });
+      $(".card__vote").each(function () {
+        applyColorByRating(this);
+      });
+      $(".full-start__rate, .full-start-new__rate").each(function () {
+        applyColorByRating(this);
+      });
+      $(".info__rate, .card__imdb-rate, .card__kinopoisk-rate").each(function () {
+        applyColorByRating(this);
+      });
+      $(".rate--kp, .rate--imdb, .rate--cub").each(function () {
+        applyColorByRating($(this).find("> div").eq(0));
+      });
     }
 
     function setupVoteColorsObserver() {
@@ -1580,10 +1751,12 @@
             var node = added[j];
             if (node.nodeType === 1) {
               var $node = $(node);
-              $node
-                .find(".card__vote, .full-start__rate, .full-start-new__rate, .info__rate, .card__imdb-rate, .card__kinopoisk-rate")
-                .each(function () { applyColorByRating(this); });
-              $node.find(".rate--kp, .rate--imdb, .rate--cub").each(function () { applyColorByRating($(this).find("> div").eq(0)); });
+              $node.find(".card__vote, .full-start__rate, .full-start-new__rate, .info__rate, .card__imdb-rate, .card__kinopoisk-rate").each(function () {
+                applyColorByRating(this);
+              });
+              $node.find(".rate--kp, .rate--imdb, .rate--cub").each(function () {
+                applyColorByRating($(this).find("> div").eq(0));
+              });
             }
           }
         }
@@ -1594,18 +1767,19 @@
 
     function setupVoteColorsForDetailPage() {
       if (!window.Lampa || !Lampa.Listener) return;
-
       Lampa.Listener.follow("full", function (data) {
         if (data.type === "complite" || data.type === "complete") updateVoteColors();
       });
     }
 
     // -----------------------------
-    // Settings: всё в "Стильный интерфейс"
+    // 8) Settings integration ("Стильный интерфейс")
     // -----------------------------
     function initializeSettings() {
-      // Встраиваем как у тебя: component style_interface
       Lampa.Settings.listener.follow("open", function (event) {
+        // ВАЖНО: при открытии настроек глушим каталожный трейлер
+        stopCatalogAudioEverywhere({ destroy: false });
+
         if (event.name == "main") {
           if (Lampa.Settings.main().render().find('[data-component="style_interface"]').length == 0) {
             Lampa.SettingsApi.addComponent({ component: "style_interface", name: "Стильный интерфейс" });
@@ -1615,7 +1789,6 @@
         }
       });
 
-      // вход в под-меню
       Lampa.SettingsApi.addParam({
         component: "interface",
         param: { name: "style_interface", type: "static", default: true },
@@ -1628,6 +1801,9 @@
           });
 
           item.on("hover:enter", function () {
+            // вход в подменю — тоже глушим каталожный звук
+            stopCatalogAudioEverywhere({ destroy: false });
+
             Lampa.Settings.create("style_interface");
             Lampa.Controller.enabled().controller.back = function () {
               Lampa.Settings.create("interface");
@@ -1636,40 +1812,53 @@
         },
       });
 
-      // --- ТВОИ настройки
+      // базовые
       Lampa.SettingsApi.addParam({ component: "style_interface", param: { name: "logo_show", type: "trigger", default: true }, field: { name: "Показывать логотип вместо названия" } });
+
       Lampa.SettingsApi.addParam({
         component: "style_interface",
         param: { name: "show_background", type: "trigger", default: true },
         field: { name: "Отображать постеры на фоне" },
-        onChange: function (value) { if (!value) $(".full-start__background").removeClass("active"); },
+        onChange: function (value) {
+          if (!value) $(".full-start__background").removeClass("active");
+        },
       });
 
-      // --- НОВОЕ: трейлер в каталоге
+      // каталожные трейлеры
       Lampa.SettingsApi.addParam({
         component: "style_interface",
         param: { name: "catalog_run_trailers", type: "trigger", default: true },
-        field: { name: "Автотрейлер в каталоге (фон)", description: "Показывает YouTube-трейлер на фоне при фокусе" },
+        field: { name: "Автотрейлер в каталоге (фон)", description: "YouTube-трейлер на фоне при фокусе" },
+        onChange: function () {
+          // при выключении — сразу стопаем
+          stopCatalogAudioEverywhere({ destroy: false });
+        },
       });
+
       Lampa.SettingsApi.addParam({
         component: "style_interface",
         param: { name: "catalog_trailer_sound", type: "trigger", default: false },
         field: { name: "Звук трейлера в каталоге", description: "Обычно лучше выключить" },
+        onChange: function () {
+          // пересоберётся на следующем playFor; на всякий — стоп
+          stopCatalogAudioEverywhere({ destroy: false });
+        },
       });
 
-      // --- Cardify (full) настройки тут же
+      // full page автотрейлер
       Lampa.SettingsApi.addParam({
         component: "style_interface",
         param: { name: "cardify_run_trailers", type: "trigger", default: true },
         field: { name: "Автотрейлер на странице фильма (Cardify)" },
       });
+
       Lampa.SettingsApi.addParam({
         component: "style_interface",
         param: { name: "cardify_trailer_sound", type: "trigger", default: true },
         field: { name: "Звук трейлера на странице фильма" },
       });
 
-      // остальное (твои переключатели)
+      // инфо-переключатели
       Lampa.SettingsApi.addParam({ component: "style_interface", param: { name: "status", type: "trigger", default: true }, field: { name: "Показывать статус фильма/сериала" } });
       Lampa.SettingsApi.addParam({ component: "style_interface", param: { name: "seas", type: "trigger", default: false }, field: { name: "Показывать количество сезонов" } });
       Lampa.SettingsApi.addParam({ component: "style_interface", param: { name: "eps", type: "trigger", default: false }, field: { name: "Показывать количество эпизодов" } });
@@ -1695,12 +1884,19 @@
         component: "style_interface",
         param: { name: "rating_border", type: "trigger", default: false },
         field: { name: "Обводка рейтингов" },
-        onChange: function () { updateVoteColors(); },
+        onChange: function () {
+          updateVoteColors();
+        },
       });
 
       Lampa.SettingsApi.addParam({
         component: "style_interface",
-        param: { name: "background_resolution", type: "select", default: "original", values: { w300: "w300", w780: "w780", w1280: "w1280", original: "original" } },
+        param: {
+          name: "background_resolution",
+          type: "select",
+          default: "original",
+          values: { w300: "w300", w780: "w780", w1280: "w1280", original: "original" },
+        },
         field: { name: "Разрешение фона", description: "Качество загружаемых фоновых изображений" },
       });
 
@@ -1708,28 +1904,126 @@
         component: "style_interface",
         param: { name: "hide_captions", type: "trigger", default: true },
         field: { name: "Скрывать названия и год", description: "Лампа будет перезагружена" },
-        onChange: function () { window.location.reload(); },
+        onChange: function () {
+          window.location.reload();
+        },
       });
 
       Lampa.SettingsApi.addParam({
         component: "style_interface",
         param: { name: "wide_post", type: "trigger", default: true },
         field: { name: "Широкие постеры", description: "Лампа будет перезагружена" },
-        onChange: function () { window.location.reload(); },
+        onChange: function () {
+          window.location.reload();
+        },
+      });
+
+      // async preload toggle (как идея)
+      Lampa.SettingsApi.addParam({
+        component: "style_interface",
+        param: { name: "async_load", type: "trigger", default: true },
+        field: { name: "Асинхронная подгрузка данных", description: "Ускоряет логотипы/трейлеры" },
       });
     }
 
     // -----------------------------
-    // Включаем всё
+    // 9) Preload visible cards (optional)
     // -----------------------------
-    installCardifyTemplateAndCss(); // <-- это возвращает "минималистичные кнопки" на full
-    hookFullAutoTrailer();          // <-- автотрейлер на странице фильма
+    var preloadTimer = null;
+    function preloadAllVisibleCards() {
+      if (!Lampa.Storage.get("async_load", true)) return;
+
+      clearTimeout(preloadTimer);
+      preloadTimer = setTimeout(function () {
+        var layer = $(".layer--visible");
+        if (!layer.length) return;
+
+        var cards = layer.find(".card");
+        cards.each(function () {
+          var data = findCardData(this);
+          if (data) {
+            // подгружаем videos заранее (чтобы каталог/логотип быстрее)
+            ensureDetails(data, "content_ratings,release_dates,videos", function () {});
+          }
+        });
+      }, 800);
+    }
+
+    function setupPreloadObserver() {
+      var observer = new MutationObserver(function (mutations) {
+        if (!Lampa.Storage.get("async_load", true)) return;
+
+        var hasNewCards = false;
+        for (var i = 0; i < mutations.length; i++) {
+          var added = mutations[i].addedNodes;
+          for (var j = 0; j < added.length; j++) {
+            var node = added[j];
+            if (node.nodeType === 1) {
+              if (node.classList.contains("card") || node.querySelector(".card")) {
+                hasNewCards = true;
+                break;
+              }
+            }
+          }
+          if (hasNewCards) break;
+        }
+
+        if (hasNewCards) preloadAllVisibleCards();
+      });
+
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
+
+    // -----------------------------
+    // 10) Global listeners to stop catalog audio on navigation
+    // -----------------------------
+    function installGlobalStopListeners() {
+      // Переходы/оверлеи
+      try {
+        if (Lampa.Controller && Lampa.Controller.listener) {
+          Lampa.Controller.listener.follow("toggle", function () {
+            stopCatalogAudioEverywhere({ destroy: false });
+          });
+        }
+      } catch (e) {}
+
+      // Любая активность поверх
+      try {
+        if (Lampa.Listener) {
+          Lampa.Listener.follow("activity", function (e) {
+            if (!e) return;
+            if (e.type === "start" || e.type === "active") {
+              // если ушли с main — стопаем каталог
+              try {
+                var ctrl = Lampa.Controller.enabled();
+                if (ctrl && ctrl.name && ctrl.name !== "main") stopCatalogAudioEverywhere({ destroy: false });
+              } catch (e2) {
+                stopCatalogAudioEverywhere({ destroy: false });
+              }
+            }
+          });
+        }
+      } catch (e3) {}
+    }
+
+    // -----------------------------
+    // Start everything
+    // -----------------------------
+    installCardifyTemplateAndCss();
+    hookFullAutoTrailer();
+
     addStylesNewInterface();
     initializeSettings();
+
     setupVoteColorsObserver();
     setupVoteColorsForDetailPage();
 
-    // Основной хук в Maker Main (твой)
+    setupPreloadObserver();
+    installGlobalStopListeners();
+
+    // -----------------------------
+    // Hook Main maker
+    // -----------------------------
     var mainMaker = Lampa.Maker.map("Main");
     if (!mainMaker || !mainMaker.Items || !mainMaker.Create) return;
 
@@ -1775,9 +2069,7 @@
       var element = args && args[0];
       var data = args && args[1];
 
-      if (element && data) {
-        handleLineAppend(this, element, data);
-      }
+      if (element && data) handleLineAppend(this, element, data);
     });
 
     wrapMethod(mainMaker.Items, "onDestroy", function (originalMethod, args) {
@@ -1786,6 +2078,7 @@
         delete this.__newInterfaceState;
       }
       delete this.__newInterfaceEnabled;
+
       if (originalMethod) originalMethod.apply(this, args);
     });
   }
