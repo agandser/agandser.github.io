@@ -1,0 +1,775 @@
+/**
+ * IPTV M3U (CLIENT-SIDE) + CUB sync (optional)
+ * - M3U парсится и хранится на стороне пользователя (localStorage)
+ * - Потоки (url) НЕ проксируются через сервер — в плеер уходит оригинальная ссылка
+ * - CUB интеграция оставлена и может синхронизировать избранное (если включить)
+ *
+ * ВАЖНО:
+ * 1) Я НЕ вижу твой M3U из “прошлого сообщения” (контекст в этой сессии обрезан),
+ *    поэтому вставь свой плейлист в M3U_TEXT ниже (между обратными кавычками).
+ * 2) Если у тебя M3U по ссылке — добавь URL в настройках и нажми “Обновить из URL”.
+ */
+
+(function () {
+  'use strict';
+
+  if (window.__iptv_m3u_client_loaded) return;
+  window.__iptv_m3u_client_loaded = true;
+
+  var PLUGIN_ID = 'iptv_m3u_client';
+  var CUB_API = 'https://cub.watch/api';
+
+  // ====== ВСТАВЬ СВОЙ M3U СЮДА ======
+  var M3U_TEXT = (function () {
+    return `
+#EXTM3U
+# Вставь сюда свой полный M3U
+#EXTINF:-1 tvg-id="example" tvg-name="Example" tvg-logo="" group-title="Demo",Example Channel
+https://example.com/stream.m3u8
+`.trim();
+  })();
+
+  // ====== Ключи хранения ======
+  var LS = {
+    m3u_text: PLUGIN_ID + ':m3u_text',
+    m3u_url: PLUGIN_ID + ':m3u_url',
+    parsed: PLUGIN_ID + ':parsed_cache',
+    favs: PLUGIN_ID + ':favs',
+    last_group: PLUGIN_ID + ':last_group',
+    // CUB
+    cub_enabled: PLUGIN_ID + ':cub_enabled',
+    cub_uid: PLUGIN_ID + ':cub_uid',
+    cub_code: PLUGIN_ID + ':cub_code',
+    cub_profile: PLUGIN_ID + ':cub_profile',
+    cub_token: PLUGIN_ID + ':cub_token'
+  };
+
+  function waitLampa(tryInit) {
+    if (window.Lampa && Lampa.SettingsApi && Lampa.Storage) return tryInit();
+    setTimeout(function () {
+      waitLampa(tryInit);
+    }, 200);
+  }
+
+  // ====== Утилиты ======
+  function safeJsonParse(s, fallback) {
+    try {
+      return JSON.parse(s);
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  function uuid4() {
+    // простой UUIDv4 без крипто-зависимостей
+    var s = [], hex = '0123456789abcdef', i;
+    for (i = 0; i < 36; i++) s[i] = hex.substr(Math.floor(Math.random() * 16), 1);
+    s[14] = '4';
+    s[19] = hex.substr((parseInt(s[19], 16) & 0x3) | 0x8, 1);
+    s[8] = s[13] = s[18] = s[23] = '-';
+    return s.join('');
+  }
+
+  function notify(msg) {
+    if (Lampa.Noty && Lampa.Noty.show) Lampa.Noty.show(msg);
+    else console.log('[IPTV]', msg);
+  }
+
+  function normalizeLine(s) {
+    return (s || '').replace(/\r/g, '').trim();
+  }
+
+  function parseAttrs(extinfLine) {
+    // extinfLine: '#EXTINF:-1 tvg-id="..." group-title="...",Name'
+    var attrs = {};
+    var beforeComma = extinfLine;
+    var commaIndex = extinfLine.indexOf(',');
+    if (commaIndex >= 0) beforeComma = extinfLine.slice(0, commaIndex);
+
+    // ищем key="value"
+    var re = /([\w-]+)\s*=\s*"([^"]*)"/g;
+    var m;
+    while ((m = re.exec(beforeComma)) !== null) {
+      attrs[m[1]] = m[2];
+    }
+
+    // name после запятой
+    var name = '';
+    if (commaIndex >= 0) name = extinfLine.slice(commaIndex + 1).trim();
+
+    attrs.__name = name;
+    return attrs;
+  }
+
+  function hashId(str) {
+    // стабильный короткий id
+    var h = 2166136261;
+    for (var i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h += (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24);
+    }
+    // unsigned
+    return ('00000000' + (h >>> 0).toString(16)).slice(-8);
+  }
+
+  // ====== Парсер M3U ======
+  function parseM3U(text) {
+    text = (text || '').trim();
+    if (!text) return { groups: {}, channels: [] };
+
+    var lines = text.split('\n');
+    var channels = [];
+    var i = 0;
+
+    while (i < lines.length) {
+      var line = normalizeLine(lines[i]);
+
+      if (!line) {
+        i++;
+        continue;
+      }
+
+      if (line.indexOf('#EXTINF') === 0) {
+        var attrs = parseAttrs(line);
+        var name = attrs.__name || 'Без названия';
+        var group = attrs['group-title'] || attrs['group'] || 'Без группы';
+        var logo = attrs['tvg-logo'] || '';
+        var tvgId = attrs['tvg-id'] || attrs['tvg-name'] || '';
+
+        // следующий НЕпустой и НЕкомментарий — это URL
+        var url = '';
+        var j = i + 1;
+        while (j < lines.length) {
+          var next = normalizeLine(lines[j]);
+          if (!next) {
+            j++;
+            continue;
+          }
+          if (next.indexOf('#') === 0) {
+            j++;
+            continue;
+          }
+          url = next;
+          break;
+        }
+
+        i = j + 1;
+
+        if (url) {
+          // КРИТИЧЕСКОЕ: url оставляем ОРИГИНАЛЬНЫМ, без прокси/сервера
+          var idBase = (tvgId ? tvgId : name) + '|' + url;
+          var ch = {
+            id: 'iptv_' + hashId(idBase),
+            name: name,
+            group: group,
+            logo: logo,
+            tvg_id: tvgId,
+            url: url
+          };
+          channels.push(ch);
+        }
+
+        continue;
+      }
+
+      i++;
+    }
+
+    // groups map
+    var groups = {};
+    for (var k = 0; k < channels.length; k++) {
+      var g = channels[k].group || 'Без группы';
+      if (!groups[g]) groups[g] = [];
+      groups[g].push(channels[k]);
+    }
+
+    return { groups: groups, channels: channels };
+  }
+
+  // ====== Избранное ======
+  function getFavs() {
+    var v = Lampa.Storage.get(LS.favs, '[]');
+    var arr = safeJsonParse(v, []);
+    if (!Array.isArray(arr)) arr = [];
+    return arr;
+  }
+
+  function setFavs(arr) {
+    Lampa.Storage.set(LS.favs, JSON.stringify(arr || []));
+  }
+
+  function isFav(id) {
+    var favs = getFavs();
+    return favs.indexOf(id) >= 0;
+  }
+
+  function toggleFav(ch) {
+    var favs = getFavs();
+    var idx = favs.indexOf(ch.id);
+    if (idx >= 0) favs.splice(idx, 1);
+    else favs.push(ch.id);
+
+    setFavs(favs);
+    notify(idx >= 0 ? 'Убрано из избранного' : 'Добавлено в избранное');
+
+    // пробуем синхронизировать в CUB (если включено)
+    CubSync.pushFavs(favs);
+  }
+
+  // ====== Загрузка/хранение плейлиста ======
+  function getM3UText() {
+    var saved = Lampa.Storage.get(LS.m3u_text, '');
+    if (saved && saved.trim()) return saved;
+    // если ничего не сохранено — используем встроенный M3U_TEXT
+    return M3U_TEXT;
+  }
+
+  function setM3UText(text) {
+    Lampa.Storage.set(LS.m3u_text, (text || '').trim());
+    // сбрасываем кэш
+    Lampa.Storage.set(LS.parsed, '');
+  }
+
+  function getM3UUrl() {
+    return (Lampa.Storage.get(LS.m3u_url, '') || '').trim();
+  }
+
+  function setM3UUrl(url) {
+    Lampa.Storage.set(LS.m3u_url, (url || '').trim());
+  }
+
+  function getParsed() {
+    var cache = Lampa.Storage.get(LS.parsed, '');
+    var parsed = cache ? safeJsonParse(cache, null) : null;
+    if (parsed && parsed.groups && parsed.channels) return parsed;
+
+    var text = getM3UText();
+    parsed = parseM3U(text);
+    Lampa.Storage.set(LS.parsed, JSON.stringify(parsed));
+    return parsed;
+  }
+
+  function fetchM3UFromUrl(url, cb) {
+    // ВАЖНО: это прямой fetch с устройства пользователя, без сервера
+    // Если CORS на твоём хосте запрещён — браузер не даст скачать M3U (это ограничение среды).
+    fetch(url, { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.text();
+      })
+      .then(function (txt) {
+        setM3UText(txt);
+        notify('M3U обновлён');
+        cb && cb(true);
+      })
+      .catch(function (e) {
+        notify('Не удалось скачать M3U напрямую: ' + (e && e.message ? e.message : e));
+        cb && cb(false);
+      });
+  }
+
+  // ====== UI (через Settings + Select) ======
+  function showGroups() {
+    var parsed = getParsed();
+    var groups = Object.keys(parsed.groups || {});
+    if (!groups.length) {
+      notify('Плейлист пустой или не распарсился');
+      return;
+    }
+
+    groups.sort(function (a, b) {
+      return a.localeCompare(b);
+    });
+
+    var items = [];
+    var last = Lampa.Storage.get(LS.last_group, '');
+
+    // Быстрый вход в избранное
+    items.push({
+      title: '★ Избранное',
+      group: '__favs__'
+    });
+
+    for (var i = 0; i < groups.length; i++) {
+      items.push({
+        title: groups[i] + (groups[i] === last ? '  (последняя)' : ''),
+        group: groups[i]
+      });
+    }
+
+    if (Lampa.Select && Lampa.Select.show) {
+      Lampa.Select.show({
+        title: 'IPTV: Группы',
+        items: items,
+        onSelect: function (it) {
+          if (!it) return;
+          if (it.group === '__favs__') showFavsChannels();
+          else {
+            Lampa.Storage.set(LS.last_group, it.group);
+            showChannels(it.group);
+          }
+        }
+      });
+    } else {
+      // fallback
+      notify('Select UI недоступен в этой сборке Lampa');
+    }
+  }
+
+  function showFavsChannels() {
+    var parsed = getParsed();
+    var favs = getFavs();
+    var byId = {};
+    for (var i = 0; i < parsed.channels.length; i++) byId[parsed.channels[i].id] = parsed.channels[i];
+
+    var list = [];
+    for (var j = 0; j < favs.length; j++) {
+      if (byId[favs[j]]) list.push(byId[favs[j]]);
+    }
+
+    if (!list.length) {
+      notify('Избранное пустое');
+      return;
+    }
+
+    showChannelsList('★ Избранное', list);
+  }
+
+  function showChannels(group) {
+    var parsed = getParsed();
+    var list = (parsed.groups && parsed.groups[group]) ? parsed.groups[group] : [];
+    if (!list.length) {
+      notify('В группе пусто');
+      return;
+    }
+    showChannelsList(group, list);
+  }
+
+  function showChannelsList(title, list) {
+    var items = [];
+    for (var i = 0; i < list.length; i++) {
+      items.push({
+        title: (isFav(list[i].id) ? '★ ' : '') + list[i].name,
+        channel_id: list[i].id
+      });
+    }
+
+    if (Lampa.Select && Lampa.Select.show) {
+      Lampa.Select.show({
+        title: 'IPTV: ' + title,
+        items: items,
+        onSelect: function (it) {
+          if (!it) return;
+          var ch = findChannelById(it.channel_id);
+          if (!ch) return notify('Канал не найден');
+          showChannelActions(ch);
+        }
+      });
+    } else {
+      notify('Select UI недоступен в этой сборке Lampa');
+    }
+  }
+
+  function findChannelById(id) {
+    var parsed = getParsed();
+    for (var i = 0; i < parsed.channels.length; i++) {
+      if (parsed.channels[i].id === id) return parsed.channels[i];
+    }
+    return null;
+  }
+
+  function showChannelActions(ch) {
+    var fav = isFav(ch.id);
+
+    var items = [
+      { title: 'Смотреть', action: 'play' },
+      { title: fav ? 'Убрать из избранного' : 'В избранное', action: 'fav' }
+    ];
+
+    if (Lampa.Select && Lampa.Select.show) {
+      Lampa.Select.show({
+        title: ch.name,
+        items: items,
+        onSelect: function (it) {
+          if (!it) return;
+          if (it.action === 'play') playChannel(ch);
+          else if (it.action === 'fav') toggleFav(ch);
+        }
+      });
+    } else {
+      playChannel(ch);
+    }
+  }
+
+  // ====== Плеер (главное — НЕ ПРОКСИРОВАТЬ) ======
+  function playChannel(ch) {
+    var url = (ch && ch.url) ? ch.url.trim() : '';
+    if (!url) return notify('Пустой URL потока');
+
+    // ВАЖНО: НЕ заменяем url на серверный прокси, НЕ добавляем host/iptv?url=...
+    var video = {
+      title: ch.name,
+      url: url,
+      poster: ch.logo || '',
+      // некоторые сборки используют timeline для IPTV — выключаем по умолчанию
+      timeline: false
+    };
+
+    try {
+      if (Lampa.Player && Lampa.Player.iptv) {
+        Lampa.Player.iptv(video);
+      }
+      if (Lampa.Player && Lampa.Player.playlist) {
+        Lampa.Player.playlist([video], 0);
+      } else if (Lampa.Player && Lampa.Player.play) {
+        // fallback
+        Lampa.Player.play(video);
+      } else {
+        notify('Плеер Lampa не найден');
+      }
+    } catch (e) {
+      notify('Ошибка запуска плеера: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  // ====== CUB Sync (оставлено; синхронизация избранного) ======
+  var CubSync = (function () {
+    function enabled() {
+      return !!Lampa.Storage.get(LS.cub_enabled, false);
+    }
+
+    function uid() {
+      var v = Lampa.Storage.get(LS.cub_uid, '');
+      if (!v) {
+        v = uuid4();
+        Lampa.Storage.set(LS.cub_uid, v);
+      }
+      return v;
+    }
+
+    function code() {
+      return (Lampa.Storage.get(LS.cub_code, '') || '').trim();
+    }
+
+    function profile() {
+      return (Lampa.Storage.get(LS.cub_profile, '') || '').trim();
+    }
+
+    function token() {
+      return (Lampa.Storage.get(LS.cub_token, '') || '').trim();
+    }
+
+    function cubFetch(path, opts) {
+      opts = opts || {};
+      var method = opts.method || 'GET';
+      var body = opts.body || null;
+
+      var headers = opts.headers || {};
+      // в CUB (старый api) часто использовали headers: token, profile
+      var t = token();
+      var p = profile();
+      if (t) headers.token = t;
+      if (p) headers.profile = p;
+
+      var url = CUB_API + '/' + path + '?uid=' + encodeURIComponent(uid());
+
+      return fetch(url, {
+        method: method,
+        headers: Object.assign({ 'Content-Type': 'application/json' }, headers),
+        body: body ? JSON.stringify(body) : null
+      }).then(function (r) {
+        return r.json().catch(function () {
+          return null;
+        }).then(function (j) {
+          if (!r.ok) {
+            var err = new Error('CUB HTTP ' + r.status);
+            err.payload = j;
+            throw err;
+          }
+          return j;
+        });
+      });
+    }
+
+    function loadProfiles(cb) {
+      // profiles/all
+      cubFetch('profiles/all', { method: 'GET' })
+        .then(function (j) {
+          cb && cb(true, j);
+        })
+        .catch(function (e) {
+          cb && cb(false, e);
+        });
+    }
+
+    function deviceAdd(cb) {
+      // device/add?uid=...&code=...
+      var c = code();
+      if (!c) return cb && cb(false, 'Нет CUB code');
+
+      var url = CUB_API + '/device/add?uid=' + encodeURIComponent(uid()) + '&code=' + encodeURIComponent(c);
+      fetch(url)
+        .then(function (r) { return r.json().catch(function () { return null; }); })
+        .then(function (j) { cb && cb(true, j); })
+        .catch(function (e) { cb && cb(false, e); });
+    }
+
+    function setProfileRemote(profileId, cb) {
+      var url = CUB_API + '/device/set_profile?uid=' + encodeURIComponent(uid()) + '&profile=' + encodeURIComponent(profileId);
+      fetch(url)
+        .then(function (r) { return r.json().catch(function () { return null; }); })
+        .then(function (j) { cb && cb(true, j); })
+        .catch(function (e) { cb && cb(false, e); });
+    }
+
+    function getTokenRemote(cb) {
+      // device/get_token?uid=...&code=...
+      var c = code();
+      if (!c) return cb && cb(false, 'Нет CUB code');
+
+      var url = CUB_API + '/device/get_token?uid=' + encodeURIComponent(uid()) + '&code=' + encodeURIComponent(c);
+      fetch(url)
+        .then(function (r) { return r.json().catch(function () { return null; }); })
+        .then(function (j) {
+          // ожидаем {token:"..."} или подобное
+          if (j && j.token) {
+            Lampa.Storage.set(LS.cub_token, j.token);
+            cb && cb(true, j);
+          } else cb && cb(false, j || 'Нет token в ответе');
+        })
+        .catch(function (e) { cb && cb(false, e); });
+    }
+
+    // Пытаемся хранить избранное в CUB как "bookmark" (если api разрешит кастомный тип)
+    // Если у тебя в твоей сборке CUB использует другой эндпоинт — просто выключи тумблер, ничего не сломается.
+    function pushFavs(favsArr) {
+      if (!enabled()) return;
+      if (!token() || !profile()) return;
+
+      var payload = {
+        // кастомный тип, чтобы не мешать обычным закладкам
+        type: 'iptv_client_favs',
+        // card-подобный объект (часто CUB хранит bookmarks как "card")
+        card: {
+          id: 'iptv_client_favs',
+          title: 'IPTV Client Favs',
+          source: 'iptv',
+          // храним сами id каналов
+          data: favsArr
+        }
+      };
+
+      cubFetch('bookmarks/add', { method: 'POST', body: payload })
+        .then(function () {
+          // тихо
+        })
+        .catch(function () {
+          // не шумим: sync optional
+        });
+    }
+
+    return {
+      enabled: enabled,
+      uid: uid,
+      loadProfiles: loadProfiles,
+      deviceAdd: deviceAdd,
+      setProfileRemote: setProfileRemote,
+      getTokenRemote: getTokenRemote,
+      pushFavs: pushFavs
+    };
+  })();
+
+  // ====== Settings ======
+  function initSettings() {
+    // компонент настроек
+    Lampa.SettingsApi.addComponent({
+      component: PLUGIN_ID,
+      name: 'IPTV (M3U Client)',
+      icon: 'tv'
+    });
+
+    // показать UID (генерится и хранится)
+    Lampa.SettingsApi.addParam({
+      component: PLUGIN_ID,
+      param: {
+        name: 'uid_view',
+        type: 'static',
+        title: 'CUB UID (для привязки)',
+        value: CubSync.uid()
+      }
+    });
+
+    Lampa.SettingsApi.addParam({
+      component: PLUGIN_ID,
+      param: {
+        name: 'm3u_url',
+        type: 'input',
+        title: 'M3U URL (необязательно)',
+        value: getM3UUrl(),
+        placeholder: 'https://.../playlist.m3u'
+      },
+      onChange: function (v) {
+        setM3UUrl(v);
+      }
+    });
+
+    Lampa.SettingsApi.addParam({
+      component: PLUGIN_ID,
+      param: {
+        name: 'update_from_url',
+        type: 'button',
+        title: 'Обновить M3U из URL (напрямую)',
+        description: 'Без сервера/прокси. Если CORS запрещён — может не скачаться.'
+      },
+      onChange: function () {
+        var url = getM3UUrl();
+        if (!url) return notify('Сначала укажи M3U URL');
+        fetchM3UFromUrl(url);
+      }
+    });
+
+    Lampa.SettingsApi.addParam({
+      component: PLUGIN_ID,
+      param: {
+        name: 'reset_to_builtin',
+        type: 'button',
+        title: 'Сбросить M3U на встроенный (из файла JS)',
+        description: 'Берёт плейлист из константы M3U_TEXT в этом скрипте.'
+      },
+      onChange: function () {
+        setM3UText('');
+        notify('Сброшено. Будет использоваться M3U_TEXT из скрипта.');
+      }
+    });
+
+    Lampa.SettingsApi.addParam({
+      component: PLUGIN_ID,
+      param: {
+        name: 'open_iptv',
+        type: 'button',
+        title: 'Открыть IPTV'
+      },
+      onChange: function () {
+        showGroups();
+      }
+    });
+
+    // ===== CUB =====
+    Lampa.SettingsApi.addParam({
+      component: PLUGIN_ID,
+      param: {
+        name: 'cub_enabled',
+        type: 'toggle',
+        title: 'CUB: Синхронизация избранного',
+        value: !!Lampa.Storage.get(LS.cub_enabled, false)
+      },
+      onChange: function (v) {
+        Lampa.Storage.set(LS.cub_enabled, !!v);
+        notify(v ? 'CUB sync включён' : 'CUB sync выключен');
+      }
+    });
+
+    Lampa.SettingsApi.addParam({
+      component: PLUGIN_ID,
+      param: {
+        name: 'cub_code',
+        type: 'input',
+        title: 'CUB: Code (для привязки)',
+        value: (Lampa.Storage.get(LS.cub_code, '') || '').trim(),
+        placeholder: 'Введи code из cub.watch'
+      },
+      onChange: function (v) {
+        Lampa.Storage.set(LS.cub_code, (v || '').trim());
+      }
+    });
+
+    Lampa.SettingsApi.addParam({
+      component: PLUGIN_ID,
+      param: {
+        name: 'cub_device_add',
+        type: 'button',
+        title: 'CUB: Привязать устройство (device/add)'
+      },
+      onChange: function () {
+        CubSync.deviceAdd(function (ok, res) {
+          notify(ok ? 'ОК: устройство привязано' : ('Ошибка device/add: ' + (res && res.message ? res.message : res)));
+        });
+      }
+    });
+
+    Lampa.SettingsApi.addParam({
+      component: PLUGIN_ID,
+      param: {
+        name: 'cub_profiles',
+        type: 'button',
+        title: 'CUB: Загрузить профили'
+      },
+      onChange: function () {
+        CubSync.loadProfiles(function (ok, res) {
+          if (!ok) return notify('Ошибка profiles/all');
+
+          // пытаемся показать выбор профиля
+          var profiles = [];
+          if (res && res.profiles && Array.isArray(res.profiles)) profiles = res.profiles;
+          else if (Array.isArray(res)) profiles = res;
+
+          if (!profiles.length) return notify('Профили не найдены');
+
+          var items = profiles.map(function (p) {
+            return {
+              title: (p.name || p.title || ('Profile ' + (p.id || p._id || ''))),
+              id: (p.id || p._id || p.profile || '')
+            };
+          }).filter(function (x) { return !!x.id; });
+
+          if (!items.length) return notify('Не удалось распознать список профилей');
+
+          if (Lampa.Select && Lampa.Select.show) {
+            Lampa.Select.show({
+              title: 'CUB: Выбор профиля',
+              items: items,
+              onSelect: function (it) {
+                if (!it || !it.id) return;
+                Lampa.Storage.set(LS.cub_profile, it.id);
+                notify('Выбран профиль: ' + it.title);
+
+                // на всякий случай дергаем set_profile (если нужно)
+                CubSync.setProfileRemote(it.id, function () {});
+              }
+            });
+          } else notify('Select UI недоступен');
+        });
+      }
+    });
+
+    Lampa.SettingsApi.addParam({
+      component: PLUGIN_ID,
+      param: {
+        name: 'cub_get_token',
+        type: 'button',
+        title: 'CUB: Получить token (device/get_token)'
+      },
+      onChange: function () {
+        CubSync.getTokenRemote(function (ok, res) {
+          notify(ok ? 'Token сохранён' : ('Ошибка get_token: ' + (res && res.message ? res.message : res)));
+        });
+      }
+    });
+  }
+
+  // ====== Инициализация ======
+  function init() {
+    // Если пользователь уже сохранял M3U — оставляем его.
+    // Иначе он будет браться из M3U_TEXT (встроенный).
+    // Кэш распарса пересоберётся сам.
+
+    try {
+      initSettings();
+      notify('IPTV (M3U Client) загружен');
+    } catch (e) {
+      console.error('[IPTV] init error', e);
+    }
+  }
+
+  waitLampa(init);
+})();
