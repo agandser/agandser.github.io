@@ -3,231 +3,246 @@
 
   if (!window.Lampa || !Lampa.Player || !Lampa.Activity) return;
 
-  const OSV3 = "https://opensubtitles-v3.strem.io/";
-  const cache = Object.create(null);
+  var OSV3 = "https://opensubtitles-v3.strem.io/";
+  var IMPORT_PREFIX = "★ OS";
+  var cache = Object.create(null); // key -> Promise|Array
 
-  const IMPORT_PREFIX = "★ OS";
-
-  // Нормализуем язык до 2-буквенного только там, где это полезно (ru/en),
-  // иначе оставляем как есть (нужно для отображения и фильтров).
+  // --- lang helpers ---
   function normLang(code) {
     if (!code) return "";
     code = String(code).toLowerCase();
 
-    // OpenSubtitles v3 обычно отдаёт ISO-639-2 (3 буквы): rus/eng/spa/...
+    // OSv3 часто ISO-639-2 (3 буквы)
     if (code === "eng" || code === "en") return "en";
     if (code === "rus" || code === "ru") return "ru";
 
-    // иногда встречаются ISO-639-1
+    // если уже 2 буквы
     if (/^[a-z]{2}$/.test(code)) return code;
 
-    // оставляем 3-буквенный как есть
-    if (/^[a-z]{3}$/.test(code)) return code;
-
-    return "";
+    return ""; // остальное не берём (чтобы не плодить мусор)
   }
 
-  // Человеческие названия (покроем популярные, остальное — fallback)
-  const LANG_NAME = {
-    ru: "Русский",
-    en: "English",
-    uk: "Українська",
-    be: "Беларуская",
-    kk: "Қазақша",
-    de: "Deutsch",
-    ger: "Deutsch",
-    fr: "Français",
-    fre: "Français",
-    es: "Español",
-    spa: "Español",
-    it: "Italiano",
-    ita: "Italiano",
-    pt: "Português",
-    por: "Português",
-    pob: "Português (BR)",
-    tr: "Türkçe",
-    tur: "Türkçe",
-    pl: "Polski",
-    pol: "Polski",
-    nl: "Nederlands",
-    nld: "Nederlands",
-    sv: "Svenska",
-    swe: "Svenska",
-    da: "Dansk",
-    dan: "Dansk",
-    fi: "Suomi",
-    fin: "Suomi",
-    el: "Ελληνικά",
-    ell: "Ελληνικά",
-    cs: "Čeština",
-    ces: "Čeština",
-    sk: "Slovenčina",
-    slk: "Slovenčina",
-    hu: "Magyar",
-    hun: "Magyar",
-    ro: "Română",
-    ron: "Română",
-    bg: "Български",
-    bul: "Български",
-    sr: "Српски",
-    hrv: "Hrvatski",
-    hr: "Hrvatski",
-    ar: "العربية",
-    ara: "العربية",
-    hi: "हिन्दी",
-    hin: "हिन्दी",
-    ja: "日本語",
-    jpn: "日本語",
-    ko: "한국어",
-    kor: "한국어",
-    zh: "中文",
-    zho: "中文",
-    cn: "中文",
-  };
-
-  function prettyLang(code) {
-    const n = normLang(code) || String(code || "").toLowerCase();
-    if (!n) return "Sub";
-    return LANG_NAME[n] || (n.length <= 3 ? n.toUpperCase() : "Sub");
+  function prettyLang(n) {
+    if (n === "ru") return "Русский";
+    if (n === "en") return "English";
+    return "Sub";
   }
 
   function getPreferredLang() {
-    // В Лампе обычно language = "ru"/"en"/...
-    let lang = "";
+    var lang = "";
     try {
-      lang = (Lampa.Storage.get("language") || Lampa.Storage.field("language") || "").toLowerCase();
+      lang = String(Lampa.Storage.get("language") || Lampa.Storage.field("language") || "").toLowerCase();
     } catch (e) {}
-
-    if (lang.includes("ru")) return "ru";
-    if (lang.includes("en")) return "en";
-    return ""; // без жёсткого дефолта
+    if (lang.indexOf("ru") !== -1) return "ru";
+    if (lang.indexOf("en") !== -1) return "en";
+    return "";
   }
 
-  async function fetchSubs(imdb, season, episode) {
-    const key = `${imdb}_${season ?? "m"}_${episode ?? "m"}`;
-    if (cache[key]) return cache[key];
+  // --- fetch ---
+  function fetchSubs(imdb, season, episode) {
+    var key = imdb + "_" + (season == null ? "m" : season) + "_" + (episode == null ? "m" : episode);
+    if (cache[key]) return Promise.resolve(cache[key]).then(function (v) { return v; });
 
-    const isSeries = season != null && episode != null;
-    const url = isSeries
-      ? `${OSV3}subtitles/series/${imdb}:${season}:${episode}.json`
-      : `${OSV3}subtitles/movie/${imdb}.json`;
+    var isSeries = season != null && episode != null;
+    var url = isSeries
+      ? OSV3 + "subtitles/series/" + imdb + ":" + season + ":" + episode + ".json"
+      : OSV3 + "subtitles/movie/" + imdb + ".json";
 
-    try {
-      const r = await fetch(url, { cache: "no-store" });
-      const j = await r.json();
-      const list = (j && j.subtitles) ? j.subtitles : [];
-      cache[key] = list;
-      return list;
-    } catch (e) {
-      console.log("[os-sub] fetch failed", e);
-      cache[key] = [];
-      return [];
-    }
+    // дедупим одновременные запросы: кладём Promise
+    cache[key] = fetch(url, { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var list = (j && j.subtitles && Array.isArray(j.subtitles)) ? j.subtitles : [];
+        cache[key] = list;
+        return list;
+      })
+      .catch(function (e) {
+        console.log("[os-sub] fetch failed", e);
+        cache[key] = [];
+        return [];
+      });
+
+    return cache[key];
   }
 
-  async function waitForReady(timeoutMs = 6000) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const activity = Lampa.Activity.active?.();
-      const playdata = Lampa.Player.playdata?.();
-      const movie = activity?.movie;
+  // --- wait pack ---
+  function waitForReady(timeoutMs) {
+    timeoutMs = timeoutMs || 6000;
 
-      if (activity && playdata && movie) return { activity, playdata, movie };
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    return null;
+    var start = Date.now();
+    return new Promise(function (resolve) {
+      (function tick() {
+        var activity = null, playdata = null, movie = null;
+        try { activity = Lampa.Activity.active(); } catch (e) {}
+        try { playdata = Lampa.Player.playdata(); } catch (e2) {}
+        try { movie = activity && activity.movie; } catch (e3) {}
+
+        if (activity && playdata && movie) return resolve({ activity: activity, playdata: playdata, movie: movie });
+
+        if (Date.now() - start >= timeoutMs) return resolve(null);
+        setTimeout(tick, 250);
+      })();
+    });
   }
 
-  function buildImportedLabel(osItem) {
-    const langHuman = prettyLang(osItem.lang);
-    const nlang = normLang(osItem.lang);
-    const enc = osItem.SubEncoding ? String(osItem.SubEncoding).toUpperCase() : "";
+  // --- ranking (чтобы выбрать 1 лучший) ---
+  function scoreItem(s) {
+    var score = 0;
 
-    // Пример: "★ OS · Русский · CP1251 · #22030"
-    const parts = [IMPORT_PREFIX, langHuman];
-    if (enc) parts.push(enc);
-    if (osItem.id) parts.push("#" + osItem.id);
+    // если есть кодировка — предпочитаем UTF
+    var enc = (s && s.SubEncoding) ? String(s.SubEncoding).toLowerCase() : "";
+    if (enc.indexOf("utf") !== -1) score += 100;
 
-    // если язык не ru/en — покажем код (чтобы было понятно)
-    if (nlang && nlang !== "ru" && nlang !== "en" && nlang.length <= 3) {
-      parts.push("(" + nlang.toUpperCase() + ")");
+    // предпочитаем vtt/srt
+    var url = (s && s.url) ? String(s.url).toLowerCase() : "";
+    if (url.indexOf(".vtt") !== -1) score += 50;
+    if (url.indexOf(".srt") !== -1) score += 30;
+
+    // если вдруг есть “score/rating/downloads” — подхватим
+    if (typeof s.score === "number") score += s.score;
+    if (typeof s.downloads === "number") score += Math.min(200, s.downloads / 10);
+
+    return score;
+  }
+
+  function buildLabel(osItem, nlang) {
+    var parts = [IMPORT_PREFIX, prettyLang(nlang)];
+
+    if (osItem && osItem.SubEncoding) {
+      parts.push(String(osItem.SubEncoding).toUpperCase());
     }
+
+    // короткий id чтобы отличать, но не спамить
+    if (osItem && osItem.id) parts.push("#" + osItem.id);
 
     return parts.join(" · ");
   }
 
-  async function setupSubs() {
-    const pack = await waitForReady();
-    if (!pack) return;
+  function uniqByUrl(list) {
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var it = list[i];
+      if (!it || !it.url) continue;
+      var exists = false;
+      for (var j = 0; j < out.length; j++) {
+        if (out[j].url === it.url) { exists = true; break; }
+      }
+      if (!exists) out.push(it);
+    }
+    return out;
+  }
 
-    const { playdata, movie } = pack;
+  // --- main ---
+  function setupSubs() {
+    return waitForReady(6500).then(function (pack) {
+      if (!pack) return;
 
-    const imdb = movie.imdb_id || movie.imdb;
-    if (!imdb || !/^tt\d+/.test(imdb)) {
-      console.log("[os-sub] no imdb_id -> cannot use OpenSubtitles-v3 addon", {
-        title: movie.title || movie.name,
-        imdb,
+      var playdata = pack.playdata;
+      var movie = pack.movie;
+
+      var imdb = movie.imdb_id || movie.imdb;
+      if (!imdb || !/^tt\d+/.test(imdb)) {
+        console.log("[os-sub] no imdb_id, skip", { title: movie.title || movie.name, imdb: imdb });
+        return;
+      }
+
+      var isSeries = (playdata.season != null && playdata.episode != null);
+      var season = isSeries ? Number(playdata.season) : undefined;
+      var episode = isSeries ? Number(playdata.episode) : undefined;
+
+      // текущие сабы (что уже есть)
+      var current = [];
+      var src = playdata.subtitles || [];
+      for (var i = 0; i < src.length; i++) {
+        var s = src[i];
+        if (!s || !s.url) continue;
+        current.push({
+          label: s.label || s.lang || "Sub",
+          url: s.url,
+          lang: normLang(s.lang),
+          _imported: false
+        });
+      }
+      current = uniqByUrl(current);
+
+      // какие языки уже есть — чтобы не дублировать импортом
+      var hasLang = { ru: false, en: false };
+      for (var k = 0; k < current.length; k++) {
+        if (current[k].lang === "ru") hasLang.ru = true;
+        if (current[k].lang === "en") hasLang.en = true;
+      }
+
+      return fetchSubs(imdb, season, episode).then(function (osList) {
+        osList = osList || [];
+
+        // собираем кандидатов только ru/en
+        var cand = { ru: [], en: [] };
+
+        for (var i2 = 0; i2 < osList.length; i2++) {
+          var it = osList[i2];
+          if (!it || !it.url) continue;
+
+          var nlang = normLang(it.lang);
+          if (nlang !== "ru" && nlang !== "en") continue;
+
+          // если такой язык уже есть в текущих — НЕ добавляем импорт (меньше мусора)
+          if (nlang === "ru" && hasLang.ru) continue;
+          if (nlang === "en" && hasLang.en) continue;
+
+          cand[nlang].push(it);
+        }
+
+        // выбираем 1 лучший на язык
+        function pickBest(arr) {
+          if (!arr || !arr.length) return null;
+          arr.sort(function (a, b) { return scoreItem(b) - scoreItem(a); });
+          return arr[0];
+        }
+
+        var bestRu = pickBest(cand.ru);
+        var bestEn = pickBest(cand.en);
+
+        var imported = [];
+        if (bestRu) imported.push({
+          label: buildLabel(bestRu, "ru"),
+          url: bestRu.url,
+          lang: "ru",
+          _imported: true
+        });
+        if (bestEn) imported.push({
+          label: buildLabel(bestEn, "en"),
+          url: bestEn.url,
+          lang: "en",
+          _imported: true
+        });
+
+        // мерджим
+        var all = uniqByUrl(current.concat(imported));
+
+        if (!all.length) return;
+
+        // выбор по умолчанию: предпочитаемый язык интерфейса,
+        // сначала НЕимпортированный, потом импортированный
+        var pref = getPreferredLang();
+        var idx = 0;
+
+        if (pref) {
+          var iNon = -1, iImp = -1;
+          for (var z = 0; z < all.length; z++) {
+            if (all[z].lang === pref && !all[z]._imported && iNon === -1) iNon = z;
+            if (all[z].lang === pref && all[z]._imported && iImp === -1) iImp = z;
+          }
+          idx = (iNon !== -1) ? iNon : (iImp !== -1 ? iImp : 0);
+        }
+
+        console.log("[os-sub] subtitles final:", all);
+        Lampa.Player.subtitles(all, idx);
       });
-      return;
-    }
-
-    const isSeries = playdata.season != null && playdata.episode != null;
-    const season = isSeries ? Number(playdata.season) : undefined;
-    const episode = isSeries ? Number(playdata.episode) : undefined;
-
-    // текущие сабы (что уже есть в плеере/источнике)
-    const current = (playdata.subtitles || [])
-      .map((s) => ({
-        label: s.label || prettyLang(s.lang) || "Sub",
-        url: s.url,
-        lang: normLang(s.lang) || "",
-        _imported: false,
-      }))
-      .filter((s) => s.url);
-
-    // импортируемые сабы из OS v3
-    const osSubsRaw = await fetchSubs(imdb, season, episode);
-
-    const imported = (osSubsRaw || [])
-      .map((s) => ({
-        label: buildImportedLabel(s),
-        url: s.url,
-        lang: normLang(s.lang) || "",
-        _imported: true,
-      }))
-      .filter((s) => s.url);
-
-    // мерджим без дублей по URL
-    const all = [...current];
-    for (const s of imported) {
-      if (!all.find((x) => x.url === s.url)) all.push(s);
-    }
-
-    if (!all.length) {
-      console.log("[os-sub] no subtitles found for", { imdb, season, episode });
-      return;
-    }
-
-    // выбираем дефолт: язык интерфейса (ru/en), предпочтение НЕимпортированным, если есть
-    const pref = getPreferredLang();
-    let idx = 0;
-
-    if (pref) {
-      const nonImportedIdx = all.findIndex((s) => s.lang === pref && !s._imported);
-      const importedIdx = all.findIndex((s) => s.lang === pref && s._imported);
-
-      if (nonImportedIdx !== -1) idx = nonImportedIdx;
-      else if (importedIdx !== -1) idx = importedIdx;
-      else idx = 0;
-    } else {
-      // если интерфейс не ru/en — оставим как есть (0)
-      idx = 0;
-    }
-
-    console.log("[os-sub] push subtitles:", all);
-    Lampa.Player.subtitles(all, idx);
+    });
   }
 
   // запуск на старте плеера
-  Lampa.Player.listener.follow("start", () => setTimeout(setupSubs, 900));
+  Lampa.Player.listener.follow("start", function () {
+    setTimeout(setupSubs, 800);
+  });
 })();
